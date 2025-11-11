@@ -1,0 +1,529 @@
+#include <termios.h>
+#include <unistd.h>
+#include <memory.h>
+#include <sys/wait.h>
+#include "mnsh.h"
+#include <stdio.h>
+
+static char param_buffer[PARAM_BUF_SIZE];
+static char *param_buffer_item[PARAM_BUF_ITEM];
+static unsigned int param_buffer_item_size=0;
+
+static char history[HISTORY_BUF_SIZE];
+static unsigned int history_bottom;
+static char history_buffer[BUF_SIZE];
+static unsigned int history_buffer_len;
+static unsigned int now_history;
+
+char buffer[BUF_SIZE];
+static unsigned int pos,len;
+
+int set_terminal_echo(int enable);
+int handle_escape_sequence(void);
+int handle_invisible_char(char c);
+unsigned handle_backslash(char *r,const char *c);
+int execute_extern_command(char * const *argv);
+
+int parse_buf_to_param(
+    char *item[],
+    unsigned *item_len,
+    char *param,
+    const char *buf,
+    unsigned len
+);
+
+unsigned int history_add(char *history,unsigned int bottom,const char *str);
+unsigned int get_last_history(unsigned int now);
+unsigned int get_next_history(unsigned int now);
+
+static inline void insert_str(
+    char *buf,
+    unsigned pos,
+    unsigned len,
+    const char *c,
+    unsigned c_len
+);
+static inline void insert(char *buf,unsigned pos,unsigned len,char c);
+static inline void backspace(char *buf,unsigned pos,unsigned len);
+static inline void delete(char *buf,unsigned pos,unsigned len);
+
+int main(int argc,const char **argv){
+
+    char c=0,start='$';
+    int ret=0,con=0;
+
+    if(set_terminal_echo(0)){
+        return 1;
+    }
+
+    while(1){
+        write(STDOUT_FILENO,&start,1);
+        write(STDOUT_FILENO," ",1);
+        start='$';
+        pos=0;
+        len=0;
+        while(1){
+            ret=read(STDIN_FILENO,&c,1);
+            // printf("%d\n",c);
+            if(ret==-1){
+                return 1;
+            }
+            if(c==0x04||ret==0){
+                write(STDOUT_FILENO,"\nexit\n",6);
+                set_terminal_echo(1);
+                return 0;
+            }
+            if(c=='\n'){
+                write(STDOUT_FILENO,"\n",1);
+                if(!con){
+                    param_buffer_item_size=0;
+                }
+                memcpy(history_buffer+history_buffer_len,buffer,len);
+                history_buffer[history_buffer_len+len]='\0';
+                ret=parse_buf_to_param(
+                    param_buffer_item,
+                    &param_buffer_item_size,
+                    param_buffer,
+                    buffer,
+                    len
+                );
+                // printf("%s\n",history_buffer);
+                con=0;
+                history_buffer_len=0;
+                if(ret>0){
+                    start='>';
+                    con=1;
+                    history_buffer_len=len-1;
+                }
+                break;
+            }else if(c==0x1b){
+                ret=handle_escape_sequence();
+
+                if(ret<0) return 1;
+                else if(ret>0) continue;
+
+            }else if(c<0x20||c==127){
+                handle_invisible_char(c);
+                continue;
+            }
+            if(len<BUF_SIZE){
+                insert(buffer,pos,len,c);
+                pos++;
+                len++;
+            }else{
+                write(STDOUT_FILENO,"\n\033[1;31mcommand too long.\033[0m\n",31);
+                break;
+            }
+        }
+    }
+
+    set_terminal_echo(1);
+
+    return 0;
+}
+
+int set_terminal_echo(int enable){
+    static struct termios original_termios;
+    static int is_saved = 0;
+    struct termios new_termios;
+
+    if(!is_saved){
+        if(tcgetattr(STDIN_FILENO,&original_termios)==-1){
+            return 1;
+        }
+        is_saved=1;
+    }
+
+    new_termios=original_termios;
+
+    if(enable){
+        new_termios.c_lflag|=(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
+    }else{
+        new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
+        new_termios.c_cc[VMIN]=1;
+        new_termios.c_cc[VTIME]=0;
+    }
+
+    if(tcsetattr(STDIN_FILENO,TCSANOW,&new_termios)==-1){
+        return 1;
+    }
+
+    return 0;
+}
+
+int handle_escape_sequence(void){
+    char c;
+    int ret=read(0,&c,1);
+    int r=1;
+
+    if(ret!=1){
+        return -1;
+    }
+
+    if(c=='['){
+        ret=read(STDIN_FILENO,&c,1);
+        if(ret!=1)return -1;
+        switch(c){
+        case 'A':
+            if(now_history==history_bottom){
+                memcpy(history_buffer,buffer,len);
+                history_buffer_len=len;
+            }
+            if(now_history!=history_bottom+1){
+                now_history=get_last_history(now_history);
+            }
+            return 1;
+        case 'B':
+            if(now_history==history_bottom){
+                memcpy(history_buffer,buffer,len);
+                len=history_buffer_len;
+            }else{
+                now_history=get_next_history(now_history);
+            }
+            return 1;
+        case 'C':
+            if(pos<len){
+                write(STDOUT_FILENO,"\033[C",3);
+                pos++;
+            }
+            return 1;
+        case 'D':
+            if(pos>0){
+                write(STDOUT_FILENO,"\033[D",3);
+                pos--;
+            }
+            return 1;
+        case 'H':
+            while(pos>0){
+                write(STDOUT_FILENO,"\033[D",3);
+                pos--;
+            }
+            return 1;
+        case 'F':
+            while(pos<len){
+                write(STDOUT_FILENO,"\033[C",3);
+                pos++;
+            }
+            return 1;
+        case '3':
+            ret=read(0,&c,1);
+            if(ret==1&&c=='~'){
+                delete(buffer,pos,len);
+                if(pos<len){
+                    len--;
+                }
+            }else{
+                insert_str(buffer,pos,len,"\033[3",3);
+                insert(buffer,pos,len,c);
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int handle_invisible_char(char c){
+    switch(c){
+    case 0x01:
+        while(pos>0){
+            pos--;
+            write(STDOUT_FILENO,"\b",1);
+        }
+        break;
+    case 0x02:
+        if(pos>0){
+            pos--;
+            write(STDOUT_FILENO,"\b",1);
+        }
+        break;
+    case 0x06:
+        if(pos<len){
+            pos++;
+            write(STDOUT_FILENO,&buffer[pos-1],1);
+        }
+        break;
+    case 0x08:
+    case 0x7f:
+        backspace(buffer,pos,len);
+        if(pos){
+            len--;
+            pos--;
+        }
+        break;
+    case 0x0b:
+        while(pos<len){
+            write(STDOUT_FILENO," ",1);
+            pos++;
+        }
+        while(pos>0&&buffer[pos-1]!='\n'){
+            pos--;
+            write(STDOUT_FILENO,"\b \b",3);
+        }
+        break;
+    }
+    return 0;
+}
+
+unsigned handle_backslash(char *r,const char *c){
+    if(c[0]>='0'&&c[0]<='9'){
+        *r=0;
+        register unsigned i=0;
+        while(i<3){
+            if(c[i]<'0'||c[i]>'9'){
+                break;
+            }
+            *r*=10;
+            *r+=c[i]-'0';
+            i++;
+        }
+        return i;
+    }else if(c[0]=='x'){
+        *r=0;
+        register unsigned i=0;
+        while(i<2){
+            if(c[i]>='0'&&c[i]<='9'){
+                *r*=16;
+                *r+=c[i]-'0';
+            }else if(c[i]>='A'&&c[i]<='F'){
+                *r*=16;
+                *r+=c[i]-'A';
+            }else if(c[i]>='a'&&c[i]<='f'){
+                *r*=16;
+                *r+=c[i]-'a';
+            }else{
+                break;
+            }
+            i++;
+        }
+        return i;
+    }
+    switch(c[0]){
+    case 't':
+        *r='\t';
+        return 1;
+    case 'n':
+        *r='\t';
+        return 1;
+    case 'r':
+        *r='\r';
+        return 1;
+    default:
+        *r=c[0];
+        return 1;
+    }
+    return 0;
+}
+
+int parse_buf_to_param(
+    char *item[],
+    unsigned *item_len,
+    char *param,
+    const char *buf,
+    unsigned len
+){
+    unsigned int param_len=(unsigned long long)(item[*item_len]-item[0]);
+
+    int skip_flg=1;
+    char sign=0;
+
+    int ret=0;
+
+    for(unsigned int i=0;i<len&&*item_len<PARAM_BUF_ITEM-1&&param_len<PARAM_BUF_SIZE;i++){
+        if(buf[i]==' '&&!sign){
+            if(!skip_flg){
+                skip_flg=1;
+                param[param_len++]='\0';
+            }
+            continue;
+        }else if(buf[i]=='\"'||buf[i]=='\''){
+            if(!sign){
+                sign=buf[i];
+                continue;
+            }
+            if(sign&&sign==buf[i]){
+                sign=0;
+                continue;
+            }
+        }
+        if(skip_flg){
+            skip_flg=0;
+            item[*item_len]=&param[param_len];
+            (*item_len)++;
+        }
+        if(buf[i]=='\\'&&i+1<len){
+            ret=handle_backslash(&param[param_len++],&buf[i+1]);
+            i+=ret;
+            continue;
+        }
+        param[param_len++]=buf[i];
+    }
+    param[param_len]='\0';
+
+    // for(int i=0;i<*item_len;i++){
+    //     printf("%d %s\n",i,item[i]);
+    // }
+    if(!*item_len){
+        return 0;
+    }
+    
+    history_bottom=history_add(history,history_bottom,history_buffer);
+    now_history=history_bottom;
+
+    if(len>0){
+        switch(buf[len-1]){
+        case '\\':
+            (*item_len)--;
+            return 1;
+        }
+    }
+
+    item[*item_len]=NULL;
+    command_func f=is_builtin_cmd(item);
+    if(f){
+        f(item);
+        return 0;
+    }
+
+    execute_extern_command(item);
+
+    param_buffer_item_size=0;
+    param_buffer_item[0]=0;
+
+    return 0;
+}
+
+int execute_extern_command(char * const *argv){
+    int pid=fork();
+    if(!pid){
+        execvp(argv[0],argv);
+        char *error_msg="command not found\n";
+        write(STDERR_FILENO,error_msg,18);
+        _exit(127);
+    }else if(pid>0){
+        int status;
+        wait(&status);
+        return 0;
+    }
+    char *error_msg="failed to fork\n";
+    write(STDERR_FILENO,error_msg,15);
+    return 1;
+}
+
+
+unsigned int history_add(char *history,unsigned int bottom,const char *str){
+    unsigned int i=0;
+    bottom++;
+    while(str[i]){
+        history[(bottom+i)%HISTORY_BUF_SIZE]=str[i];
+        i++;
+    }
+    history[(bottom+i)%HISTORY_BUF_SIZE]='\0';
+    return (bottom+i)%HISTORY_BUF_SIZE;
+}
+
+unsigned int get_last_history(unsigned int now){
+    unsigned int i=now-1;
+    if(!now){
+        i=HISTORY_BUF_SIZE-1;
+    }
+    while(history[i]){
+        if(!i){
+            i=HISTORY_BUF_SIZE;
+        }
+        i--;
+    }
+    unsigned r=(i+1)%HISTORY_BUF_SIZE;
+    i++;
+    while(history[i%HISTORY_BUF_SIZE]){
+        buffer[i]=history[i%HISTORY_BUF_SIZE];
+        i++;
+    }
+    buffer[i]='\0';
+    len=i;
+    pos=i;
+    return r;
+}
+
+unsigned int get_next_history(unsigned int now){
+    unsigned int i=now+1;
+    while(history[i%HISTORY_BUF_SIZE]){
+        buffer[i]=history[i%HISTORY_BUF_SIZE];
+        i++;
+    }
+    buffer[i]='\0';
+    len=i;
+    pos=i;
+    return (i+1)%HISTORY_BUF_SIZE;
+}
+
+
+static inline void insert_str(
+    char *buf,
+    unsigned pos,
+    unsigned len,
+    const char *c,
+    unsigned c_len
+){
+    if(len+c_len>=BUF_SIZE){
+        return ;
+    }
+    if(pos==len){
+        memcpy(buf+len,c,c_len);
+        write(STDOUT_FILENO,c,c_len);
+    }else{
+        memmove(buf+pos+c_len,buf+pos,len-pos);
+        memcpy(buf+pos,c,c_len);
+        write(STDOUT_FILENO,buf+pos,len-pos+c_len);
+        for(int i=0;i<len-pos;i++){
+            write(STDOUT_FILENO,"\b",1);
+        }
+    }
+}
+
+static inline void insert(char *buf,unsigned pos,unsigned len,char c){
+    if(pos==len){
+        buf[pos]=c;
+        write(STDOUT_FILENO,&c,1);
+    }else{
+        memmove(buf+pos+1,buf+pos,len-pos);
+        buf[pos]=c;
+        write(STDOUT_FILENO,buf+pos,len-pos+1);
+        for(int i=0;i<len-pos;i++){
+            write(STDOUT_FILENO,"\b",1);
+        }
+    }
+}
+
+static inline void backspace(char *buf,unsigned pos,unsigned len){
+    if(!pos){
+        return ;
+    }
+    if(pos==len){
+        write(STDOUT_FILENO,"\b \b",3);
+        return ;
+    }
+    memmove(buf+pos-1,buf+pos,len-pos);
+    write(STDOUT_FILENO,"\b",1);
+    write(STDOUT_FILENO,buf+pos-1,len-pos);
+    write(STDOUT_FILENO," ",1);
+    for(int i=0;i<len-pos+1;i++){
+        write(STDOUT_FILENO,"\b",1);
+    }
+}
+
+static inline void delete(char *buf,unsigned pos,unsigned len){
+    if(pos>=len){
+        return ;
+    }
+    if(pos==len-1){
+        write(STDOUT_FILENO," \b",2);
+        return ;
+    }
+    memmove(buf+pos,buf+pos+1,len-pos);
+    write(STDOUT_FILENO,buf+pos,len-pos);
+    write(STDOUT_FILENO," ",1);
+    for(int i=0;i<len-pos;i++){
+        write(STDOUT_FILENO,"\b",1);
+    }
+}
