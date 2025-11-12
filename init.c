@@ -17,6 +17,7 @@ int init(void){
 
     r|=register_builtin("cd",NULL);
     r|=register_builtin("pwd",NULL);
+    r|=register_builtin("history",NULL);
 
     r|=register_builtin("export",NULL);
     r|=register_builtin("readonly",NULL);

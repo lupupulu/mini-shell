@@ -3,6 +3,12 @@
 
 #include "config.h"
 
+void history_reset(void);
+int history_add(const char *str,unsigned int len);
+int history_remove(void);
+int get_last_history(char *buf);
+int get_next_history(char *buf);
+
 typedef int(*command_func)(char *const *);
 typedef struct {
     const char *key;
@@ -18,6 +24,7 @@ command_func is_builtin_cmd(char *const *argv);
 
 int sh_cd(char *const *argv);
 int sh_pwd(char *const *argv);
+int sh_history(char *const *argv);
 
 int sh_export(char *const *argv);
 int sh_readonly(char *const *argv);

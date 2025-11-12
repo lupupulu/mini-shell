@@ -9,14 +9,11 @@ static char param_buffer[PARAM_BUF_SIZE];
 static char *param_buffer_item[PARAM_BUF_ITEM];
 static unsigned int param_buffer_item_size=0;
 
-static char history[HISTORY_BUF_SIZE];
-static unsigned int history_bottom;
-static char history_buffer[BUF_SIZE];
-static unsigned int history_buffer_len;
-static unsigned int now_history;
-
 char buffer[BUF_SIZE];
-static unsigned int pos,len;
+static unsigned int len;
+static unsigned int pos;
+static int buffer_is_saved=0,now_is_bufffer=1;
+static char start='$';
 
 int set_terminal_echo(int enable);
 int handle_escape_sequence(void);
@@ -28,13 +25,9 @@ int parse_buf_to_param(
     char *item[],
     unsigned *item_len,
     char *param,
-    const char *buf,
+    char *buf,
     unsigned len
 );
-
-unsigned int history_add(char *history,unsigned int bottom,const char *str);
-unsigned int get_last_history(unsigned int now);
-unsigned int get_next_history(unsigned int now);
 
 static inline void insert_str(
     char *buf,
@@ -49,7 +42,7 @@ static inline void delete(char *buf,unsigned pos,unsigned len);
 
 int main(int argc,const char **argv){
 
-    char c=0,start='$';
+    char c=0;
     int ret=0,con=0;
 
     if(set_terminal_echo(0)){
@@ -59,9 +52,9 @@ int main(int argc,const char **argv){
     while(1){
         write(STDOUT_FILENO,&start,1);
         write(STDOUT_FILENO," ",1);
-        start='$';
         pos=0;
         len=0;
+        buffer[0]='\0';
         while(1){
             ret=read(STDIN_FILENO,&c,1);
             // printf("%d\n",c);
@@ -75,11 +68,16 @@ int main(int argc,const char **argv){
             }
             if(c=='\n'){
                 write(STDOUT_FILENO,"\n",1);
+                start='$';
                 if(!con){
                     param_buffer_item_size=0;
                 }
-                memcpy(history_buffer+history_buffer_len,buffer,len);
-                history_buffer[history_buffer_len+len]='\0';
+                if(buffer_is_saved){
+                    buffer_is_saved=0;
+                    history_remove();
+                }
+                buffer_is_saved=0;
+                now_is_bufffer=1;
                 ret=parse_buf_to_param(
                     param_buffer_item,
                     &param_buffer_item_size,
@@ -89,11 +87,9 @@ int main(int argc,const char **argv){
                 );
                 // printf("%s\n",history_buffer);
                 con=0;
-                history_buffer_len=0;
                 if(ret>0){
                     start='>';
                     con=1;
-                    history_buffer_len=len-1;
                 }
                 break;
             }else if(c==0x1b){
@@ -101,6 +97,7 @@ int main(int argc,const char **argv){
 
                 if(ret<0) return 1;
                 else if(ret>0) continue;
+                else c='[';
 
             }else if(c<0x20||c==127){
                 handle_invisible_char(c);
@@ -111,7 +108,7 @@ int main(int argc,const char **argv){
                 pos++;
                 len++;
             }else{
-                write(STDOUT_FILENO,"\n\033[1;31mcommand too long.\033[0m\n",31);
+                write(STDOUT_FILENO,"\ncommand too long.\n",19);
                 break;
             }
         }
@@ -124,7 +121,7 @@ int main(int argc,const char **argv){
 
 int set_terminal_echo(int enable){
     static struct termios original_termios;
-    static int is_saved = 0;
+    static int is_saved=0;
     struct termios new_termios;
 
     if(!is_saved){
@@ -152,9 +149,10 @@ int set_terminal_echo(int enable){
 }
 
 int handle_escape_sequence(void){
-    char c;
+    char c,tmp[8];
     int ret=read(0,&c,1);
-    int r=1;
+
+    char space=0;
 
     if(ret!=1){
         return -1;
@@ -165,21 +163,45 @@ int handle_escape_sequence(void){
         if(ret!=1)return -1;
         switch(c){
         case 'A':
-            if(now_history==history_bottom){
-                memcpy(history_buffer,buffer,len);
-                history_buffer_len=len;
+            // printf("%d %d\n",buffer_is_saved,now_is_bufffer);
+            if(!buffer_is_saved){
+                history_add(buffer,len);
+                // printf("saved\n");
+                buffer_is_saved=1;
+                now_is_bufffer=0;
+                // get_last_history(NULL);
             }
-            if(now_history!=history_bottom+1){
-                now_history=get_last_history(now_history);
+            if(get_last_history(buffer)){
+                return 1;
             }
+            write(STDOUT_FILENO,"\r\033[K",5);
+            write(STDOUT_FILENO,&start,1);
+            write(STDOUT_FILENO," ",1);
+
+            len=strlen(buffer);
+            pos=len;
+            write(STDOUT_FILENO,buffer,len);
             return 1;
         case 'B':
-            if(now_history==history_bottom){
-                memcpy(history_buffer,buffer,len);
-                len=history_buffer_len;
-            }else{
-                now_history=get_next_history(now_history);
+            if(ret=get_next_history(buffer)){
+                if(!buffer_is_saved){
+                    return 1;
+                }
             }
+
+            write(STDOUT_FILENO,"\r\033[K",5);
+            write(STDOUT_FILENO,&start,1);
+            write(STDOUT_FILENO," ",1);
+            len=strlen(buffer);
+            pos=len;
+            write(STDOUT_FILENO,buffer,len);
+
+            if(ret){
+                history_remove();
+                now_is_bufffer=1;
+                buffer_is_saved=0;
+            }
+
             return 1;
         case 'C':
             if(pos<len){
@@ -213,8 +235,71 @@ int handle_escape_sequence(void){
                     len--;
                 }
             }else{
-                insert_str(buffer,pos,len,"\033[3",3);
-                insert(buffer,pos,len,c);
+                memcpy(tmp,"[[3",3);
+                tmp[3]=c;
+                insert_str(buffer,pos,len,tmp,4);
+                len+=4;
+                pos+=4;
+                return 1;
+            }
+            return 1;
+        case '1':
+            ret=read(0,&c,1);
+            if(ret!=1) return -1;
+            memcpy(tmp,"[[1",3);
+            tmp[3]=c;
+            if(c!=';'){
+                insert_str(buffer,pos,len,tmp,4);
+                len+=4;
+                pos+=4;
+                return 1;
+            }
+            ret=read(0,&c,1);
+            if(ret!=1) return -1;
+            tmp[4]=c;
+            if(c=='5'){
+                ret=read(0,&c,1);
+                tmp[5]=c;
+                if(ret!=1) return -1;
+                if(c=='D'){
+                    if(pos&&buffer[pos-1]==' '){
+                        space=1;
+                    }
+                    while(pos){
+                        if(space&&buffer[pos-1]!=' '){
+                            break;
+                        }
+                        if(!space&&buffer[pos-1]==' '){
+                            break;
+                        }
+                        write(STDOUT_FILENO,"\033[D",3);
+                        pos--;
+                    }
+                }else if(c=='C'){
+                    if(pos<len&&buffer[pos+1]==' '){
+                        space=1;
+                    }
+                    while(pos<len){
+                        if(space&&buffer[pos+1]!=' '){
+                            break;
+                        }
+                        if(!space&&buffer[pos+1]==' '){
+                            break;
+                        }
+                        write(STDOUT_FILENO,"\033[C",3);
+                        pos++;
+                    }
+                }else{
+                    insert_str(buffer,pos,len,tmp,6);
+                    len+=6;
+                    pos+=6;
+                    return 1;
+                }
+            }else{
+                insert_str(buffer,pos,len,tmp,5);
+                len+=5;
+                pos+=5;
+                return 1;
             }
             return 1;
         }
@@ -247,6 +332,23 @@ int handle_invisible_char(char c){
     case 0x7f:
         backspace(buffer,pos,len);
         if(pos){
+            len--;
+            pos--;
+        }
+        break;
+    case 0x17:
+        int space=0;
+        if(pos&&buffer[pos-1]==' '){
+            space=1;
+        }
+        while(pos){
+            if(space&&buffer[pos-1]!=' '){
+                break;
+            }
+            if(!space&&buffer[pos-1]==' '){
+                break;
+            }
+            backspace(buffer,pos,len);
             len--;
             pos--;
         }
@@ -319,13 +421,38 @@ int parse_buf_to_param(
     char *item[],
     unsigned *item_len,
     char *param,
-    const char *buf,
+    char *buf,
     unsigned len
 ){
+    static char temp[BUF_SIZE];
+    static unsigned int temp_len;
+
+    if(len&&buf[len-1]=='\\'&&temp_len+len<BUF_SIZE){
+        if(temp_len){
+            history_remove();
+        }
+        memcpy(temp+temp_len,buf,len);
+        temp_len+=len;
+        temp[temp_len]='\0';
+        history_add(temp,temp_len);
+        temp[--temp_len]='\0';
+        return 1;
+    }
+
+    if(temp_len){
+        history_remove();
+        memcpy(temp+temp_len,buf,len);
+        temp_len+=len;
+        temp[temp_len]='\0';
+        memcpy(buf,temp,temp_len+1);
+        len=temp_len;
+    }
+
     unsigned int param_len=(unsigned long long)(item[*item_len]-item[0]);
 
     int skip_flg=1;
     char sign=0;
+    int note=0;
 
     int ret=0;
 
@@ -336,6 +463,11 @@ int parse_buf_to_param(
                 param[param_len++]='\0';
             }
             continue;
+        }else if(buf[i]=='#'){
+            if(!sign){
+                break;
+            }
+            note=1;
         }else if(buf[i]=='\"'||buf[i]=='\''){
             if(!sign){
                 sign=buf[i];
@@ -343,6 +475,7 @@ int parse_buf_to_param(
             }
             if(sign&&sign==buf[i]){
                 sign=0;
+                note=0;
                 continue;
             }
         }
@@ -356,6 +489,9 @@ int parse_buf_to_param(
             i+=ret;
             continue;
         }
+        if(note){
+            continue;
+        }
         param[param_len++]=buf[i];
     }
     param[param_len]='\0';
@@ -366,17 +502,15 @@ int parse_buf_to_param(
     if(!*item_len){
         return 0;
     }
-    
-    history_bottom=history_add(history,history_bottom,history_buffer);
-    now_history=history_bottom;
+
 
     if(len>0){
         switch(buf[len-1]){
-        case '\\':
-            (*item_len)--;
-            return 1;
         }
     }
+
+    // printf("%s %d\n",buf,len);
+    history_add(buf,len);
 
     item[*item_len]=NULL;
     command_func f=is_builtin_cmd(item);
@@ -390,6 +524,8 @@ int parse_buf_to_param(
     param_buffer_item_size=0;
     param_buffer_item[0]=0;
 
+    temp_len=0;
+
     return 0;
 }
 
@@ -397,65 +533,18 @@ int execute_extern_command(char * const *argv){
     int pid=fork();
     if(!pid){
         execvp(argv[0],argv);
-        char *error_msg="command not found\n";
-        write(STDERR_FILENO,error_msg,18);
+        write(STDERR_FILENO,argv[0],strlen(argv[0]));
+        write(STDERR_FILENO,": command not found\n",20);
         _exit(127);
     }else if(pid>0){
         int status;
         wait(&status);
         return 0;
     }
-    char *error_msg="failed to fork\n";
-    write(STDERR_FILENO,error_msg,15);
+    write(STDERR_FILENO,"failed to fork\n",15);
     return 1;
 }
 
-
-unsigned int history_add(char *history,unsigned int bottom,const char *str){
-    unsigned int i=0;
-    bottom++;
-    while(str[i]){
-        history[(bottom+i)%HISTORY_BUF_SIZE]=str[i];
-        i++;
-    }
-    history[(bottom+i)%HISTORY_BUF_SIZE]='\0';
-    return (bottom+i)%HISTORY_BUF_SIZE;
-}
-
-unsigned int get_last_history(unsigned int now){
-    unsigned int i=now-1;
-    if(!now){
-        i=HISTORY_BUF_SIZE-1;
-    }
-    while(history[i]){
-        if(!i){
-            i=HISTORY_BUF_SIZE;
-        }
-        i--;
-    }
-    unsigned r=(i+1)%HISTORY_BUF_SIZE;
-    i++;
-    while(history[i%HISTORY_BUF_SIZE]){
-        buffer[i]=history[i%HISTORY_BUF_SIZE];
-        i++;
-    }
-    buffer[i]='\0';
-    len=i;
-    pos=i;
-    return r;
-}
-
-unsigned int get_next_history(unsigned int now){
-    unsigned int i=now+1;
-    while(history[i%HISTORY_BUF_SIZE]){
-        buffer[i]=history[i%HISTORY_BUF_SIZE];
-        i++;
-    }
-    buffer[i]='\0';
-    len=i;
-    pos=i;
-    return (i+1)%HISTORY_BUF_SIZE;
-}
 
 
 static inline void insert_str(
