@@ -105,7 +105,15 @@ int sh_true(char *const *argv){}
 int sh_false(char *const *argv){}
 
 int sh_command(char *const *argv){}
-int sh_exec(char *const *argv){}
+int sh_exec(char *const *argv){
+    if(!argv[1]){
+        return 1;
+    }
+    execvp(argv[1],&argv[1]);
+    write(STDERR_FILENO,argv[1],strlen(argv[1]));
+    write(STDERR_FILENO,": command not found\n",20);
+    return 127;
+}
 int sh_eval(char *const *argv){}
 int sh_times(char *const *argv){}
 

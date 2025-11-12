@@ -97,6 +97,7 @@ int main(int argc,const char **argv){
 
                 if(ret<0) return 1;
                 else if(ret>0) continue;
+                else c='[';
 
             }else if(c<0x20||c==127){
                 handle_invisible_char(c);
@@ -148,9 +149,10 @@ int set_terminal_echo(int enable){
 }
 
 int handle_escape_sequence(void){
-    char c;
+    char c,tmp[8];
     int ret=read(0,&c,1);
-    int r=1;
+
+    char space=0;
 
     if(ret!=1){
         return -1;
@@ -233,8 +235,71 @@ int handle_escape_sequence(void){
                     len--;
                 }
             }else{
-                insert_str(buffer,pos,len,"\033[3",3);
-                insert(buffer,pos,len,c);
+                memcpy(tmp,"[[3",3);
+                tmp[3]=c;
+                insert_str(buffer,pos,len,tmp,4);
+                len+=4;
+                pos+=4;
+                return 1;
+            }
+            return 1;
+        case '1':
+            ret=read(0,&c,1);
+            if(ret!=1) return -1;
+            memcpy(tmp,"[[1",3);
+            tmp[3]=c;
+            if(c!=';'){
+                insert_str(buffer,pos,len,tmp,4);
+                len+=4;
+                pos+=4;
+                return 1;
+            }
+            ret=read(0,&c,1);
+            if(ret!=1) return -1;
+            tmp[4]=c;
+            if(c=='5'){
+                ret=read(0,&c,1);
+                tmp[5]=c;
+                if(ret!=1) return -1;
+                if(c=='D'){
+                    if(pos&&buffer[pos-1]==' '){
+                        space=1;
+                    }
+                    while(pos){
+                        if(space&&buffer[pos-1]!=' '){
+                            break;
+                        }
+                        if(!space&&buffer[pos-1]==' '){
+                            break;
+                        }
+                        write(STDOUT_FILENO,"\033[D",3);
+                        pos--;
+                    }
+                }else if(c=='C'){
+                    if(pos<len&&buffer[pos+1]==' '){
+                        space=1;
+                    }
+                    while(pos<len){
+                        if(space&&buffer[pos+1]!=' '){
+                            break;
+                        }
+                        if(!space&&buffer[pos+1]==' '){
+                            break;
+                        }
+                        write(STDOUT_FILENO,"\033[C",3);
+                        pos++;
+                    }
+                }else{
+                    insert_str(buffer,pos,len,tmp,6);
+                    len+=6;
+                    pos+=6;
+                    return 1;
+                }
+            }else{
+                insert_str(buffer,pos,len,tmp,5);
+                len+=5;
+                pos+=5;
+                return 1;
             }
             return 1;
         }
@@ -267,6 +332,23 @@ int handle_invisible_char(char c){
     case 0x7f:
         backspace(buffer,pos,len);
         if(pos){
+            len--;
+            pos--;
+        }
+        break;
+    case 0x17:
+        int space=0;
+        if(pos&&buffer[pos-1]==' '){
+            space=1;
+        }
+        while(pos){
+            if(space&&buffer[pos-1]!=' '){
+                break;
+            }
+            if(!space&&buffer[pos-1]==' '){
+                break;
+            }
+            backspace(buffer,pos,len);
             len--;
             pos--;
         }
@@ -370,6 +452,7 @@ int parse_buf_to_param(
 
     int skip_flg=1;
     char sign=0;
+    int note=0;
 
     int ret=0;
 
@@ -380,6 +463,11 @@ int parse_buf_to_param(
                 param[param_len++]='\0';
             }
             continue;
+        }else if(buf[i]=='#'){
+            if(!sign){
+                break;
+            }
+            note=1;
         }else if(buf[i]=='\"'||buf[i]=='\''){
             if(!sign){
                 sign=buf[i];
@@ -387,6 +475,7 @@ int parse_buf_to_param(
             }
             if(sign&&sign==buf[i]){
                 sign=0;
+                note=0;
                 continue;
             }
         }
@@ -398,6 +487,9 @@ int parse_buf_to_param(
         if(buf[i]=='\\'&&i+1<len){
             ret=handle_backslash(&param[param_len++],&buf[i+1]);
             i+=ret;
+            continue;
+        }
+        if(note){
             continue;
         }
         param[param_len++]=buf[i];
