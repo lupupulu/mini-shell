@@ -1,6 +1,6 @@
 #include "mnsh.h"
 #include <unistd.h>
-// #include <string.h>
+#include <string.h>
 
 static inline int cmd_strcmp(const char *str1,const char *str2);
 #ifndef _STRING_H

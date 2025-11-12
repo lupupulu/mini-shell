@@ -3,7 +3,7 @@ CFLAG ?= -std=c99 -O2 -g
 
 ALL: mnsh
 
-mnsh: main.c config.c builtin_cmd.o
+mnsh: main.c config.c history.c builtin_cmd.o
 	$(CC) $(CFLAG) $^ -o $@
 
 config.c: init
