@@ -3,7 +3,7 @@
 #include <memory.h>
 #include <sys/wait.h>
 #include "mnsh.h"
-#include <stdio.h>
+// #include <stdio.h>
 
 static char param_buffer[PARAM_BUF_SIZE];
 static char *param_buffer_item[PARAM_BUF_ITEM];
@@ -40,13 +40,19 @@ static inline void insert(char *buf,unsigned pos,unsigned len,char c);
 static inline void backspace(char *buf,unsigned pos,unsigned len);
 static inline void delete(char *buf,unsigned pos,unsigned len);
 
-int main(int argc,const char **argv){
+int main(int argc,const char **argv,char **env){
 
     char c=0;
     int ret=0,con=0;
 
     if(set_terminal_echo(0)){
         return 1;
+    }
+
+    unsigned i=0;
+    while(env[i]){
+        set_var(env[i],cmd_strlen(env[i]),VAR_EXPORT);
+        i++;
     }
 
     while(1){
@@ -183,7 +189,7 @@ int handle_escape_sequence(void){
             write(STDOUT_FILENO,buffer,len);
             return 1;
         case 'B':
-            if(ret=get_next_history(buffer)){
+            if((ret=get_next_history(buffer))!=0){
                 if(!buffer_is_saved){
                     return 1;
                 }

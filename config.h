@@ -20,4 +20,11 @@
 #define HASH_SIZE 63
 #endif
 
+#ifndef VAR_ITEM
+#define VAR_ITEM 256
+#endif
+#ifndef VAR_SIZE
+#define VAR_SIZE 1024
+#endif
+
 #endif

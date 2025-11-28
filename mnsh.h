@@ -3,6 +3,10 @@
 
 #include "config.h"
 
+int cmd_strcmp(const char *str1,const char *str2);
+long unsigned int cmd_strlen(const char *str);
+int cmd_unsigned_to_str(char *str,unsigned long size,unsigned num);
+
 void history_reset(void);
 int history_add(const char *str,unsigned int len);
 int history_remove(void);
@@ -21,6 +25,16 @@ extern hash_pair_t builtin_cmd_hash[HASH_SIZE];
 extern char buffer[BUF_SIZE];
 unsigned int hash_function(const char *str);
 command_func is_builtin_cmd(char *const *argv);
+
+
+#define VAR_EXPORT   0b00000001
+#define VAR_READONLY 0b00000010
+#define VAR_EXIST    0b10000000
+unsigned parse_var(char *buf,unsigned len,const char *str);
+// int export_var(const char *env,unsigned len);
+int get_var(char *buf,unsigned buflen,const char *var,unsigned *len,unsigned *cnt);
+int set_var(const char *var,unsigned len,char umask);
+int unset_var(const char *var,unsigned len);
 
 int sh_cd(char *const *argv);
 int sh_pwd(char *const *argv);

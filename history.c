@@ -1,7 +1,10 @@
 #include "mnsh.h"
 #include <unistd.h>
-#include <string.h>
-#include <stdio.h>
+#include <memory.h>
+// #include <string.h>
+// #include <stdio.h>
+
+#define MIN(a,b) ((a)<(b)?(a):(b))
 
 static char history[HISTORY_BUF_SIZE];
 static unsigned int history_len;
@@ -92,11 +95,23 @@ int get_next_history(char *buf){
 
 
 int sh_history(char *const *argv){
-    unsigned int i=0,cnt=0;
+    unsigned int i=0,cnt=0,len=0,tmp=0;
     // printf("%d\n",history_len);
     while(i<history_len){
-        printf("  %d  %s\n",cnt,history+i);
-        i+=strlen(history+i);
+        buffer[0]=' ';
+        buffer[1]=' ';
+        len=2;
+        len+=cmd_unsigned_to_str(buffer+2,BUF_SIZE-2,cnt);
+        buffer[len++]=' ';
+        buffer[len++]=' ';
+
+        tmp=cmd_strlen(history+i);
+        memcpy(buffer+len,history+i,MIN(tmp,BUF_SIZE-len-1));
+        len+=MIN(tmp,BUF_SIZE-len-1);
+        buffer[len++]='\n';
+
+        write(STDOUT_FILENO,buffer,len);
+        i+=cmd_strlen(history+i);
         i+=3;
         cnt++;
     }
