@@ -7,6 +7,8 @@ hash_pair_t builtin_cmd_hash[HASH_SIZE];
 
 char buffer[BUF_SIZE];
 
+char start='$';
+
 
 int register_builtin(const char *name,command_func f);
 int init(void);
@@ -25,7 +27,6 @@ int init(void){
 
     r|=register_builtin("read",NULL);
     r|=register_builtin("echo",NULL);
-    r|=register_builtin("printf",NULL);
 
     r|=register_builtin("jobs",NULL);
     r|=register_builtin("fg",NULL);
