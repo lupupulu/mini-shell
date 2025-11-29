@@ -3,11 +3,16 @@
 #include <memory.h>
 #include <sys/wait.h>
 #include "mnsh.h"
-// #include <stdio.h>
+#include <stdio.h>
 
-static char param_buffer[PARAM_BUF_SIZE];
-static char *param_buffer_item[PARAM_BUF_ITEM];
-static unsigned int param_buffer_item_size=0;
+#define IS_LEGAL(c) (\
+        ((c)>='A'&&(c)<='Z')||\
+        ((c)>='a'&&(c)<='z')||\
+        ((c)>='0'&&(c)<='9')||\
+        (c)=='_'\
+    )
+
+static unsigned int item_len=0;
 
 char buffer[BUF_SIZE];
 static unsigned int len;
@@ -22,9 +27,6 @@ unsigned handle_backslash(char *r,const char *c);
 int execute_extern_command(char * const *argv);
 
 int parse_buf_to_param(
-    char *item[],
-    unsigned *item_len,
-    char *param,
     char *buf,
     unsigned len
 );
@@ -51,7 +53,7 @@ int main(int argc,const char **argv,char **env){
 
     unsigned i=0;
     while(env[i]){
-        set_var(env[i],cmd_strlen(env[i]),VAR_EXPORT);
+        set_var(env[i],VAR_EXPORT);
         i++;
     }
 
@@ -76,7 +78,7 @@ int main(int argc,const char **argv,char **env){
                 write(STDOUT_FILENO,"\n",1);
                 start='$';
                 if(!con){
-                    param_buffer_item_size=0;
+                    item_len=0;
                 }
                 if(buffer_is_saved){
                     buffer_is_saved=0;
@@ -85,9 +87,6 @@ int main(int argc,const char **argv,char **env){
                 buffer_is_saved=0;
                 now_is_bufffer=1;
                 ret=parse_buf_to_param(
-                    param_buffer_item,
-                    &param_buffer_item_size,
-                    param_buffer,
                     buffer,
                     len
                 );
@@ -424,12 +423,13 @@ unsigned handle_backslash(char *r,const char *c){
 }
 
 int parse_buf_to_param(
-    char *item[],
-    unsigned *item_len,
-    char *param,
     char *buf,
     unsigned len
 ){
+    static char param[PARAM_BUF_SIZE];
+    static char *item[PARAM_BUF_ITEM];
+    static unsigned item_len;
+
     static char temp[BUF_SIZE];
     static unsigned int temp_len;
 
@@ -454,15 +454,25 @@ int parse_buf_to_param(
         len=temp_len;
     }
 
-    unsigned int param_len=(unsigned long long)(item[*item_len]-item[0]);
+    unsigned int param_len=(unsigned long long)(item[item_len]-item[0]);
 
     int skip_flg=1;
     char sign=0;
     int note=0;
 
+    int var=0;
+    unsigned var_start=0;
+    unsigned var_len,var_cnt;
+
     int ret=0;
 
-    for(unsigned int i=0;i<len&&*item_len<PARAM_BUF_ITEM-1&&param_len<PARAM_BUF_SIZE;i++){
+    for(unsigned int i=0;i<len&&item_len<PARAM_BUF_ITEM-1&&param_len<PARAM_BUF_SIZE;i++){
+        if(var&&!IS_LEGAL(buf[i])){
+            var_len=0,var_cnt=0;
+            get_var(param+var_start,PARAM_BUF_SIZE-var_start-1,param+var_start+1,&var_len,&var_cnt);
+            param_len=var_start+var_cnt;
+            var=0;
+        }
         if(buf[i]==' '&&!sign){
             if(!skip_flg){
                 skip_flg=1;
@@ -484,11 +494,20 @@ int parse_buf_to_param(
                 note=0;
                 continue;
             }
+        }else if(sign!='\''&&buf[i]=='$'){
+            var=1;
+            var_start=param_len;
         }
         if(skip_flg){
             skip_flg=0;
-            item[*item_len]=&param[param_len];
-            (*item_len)++;
+            item[item_len]=&param[param_len];
+            item_len++;
+        }
+        if(sign!='\''&&buf[i]=='~'&&(!i||buf[i-1]==' ')&&(buf[i+1]=='/'||buf[i+1]==' '||buf[i+1]=='\0')){
+            var_len=0,var_cnt=0;
+            get_var(param+param_len,PARAM_BUF_SIZE-param_len-1,"HOME",&var_len,&var_cnt);
+            param_len+=var_cnt;
+            continue;
         }
         if(buf[i]=='\\'&&i+1<len){
             ret=handle_backslash(&param[param_len++],&buf[i+1]);
@@ -500,35 +519,38 @@ int parse_buf_to_param(
         }
         param[param_len++]=buf[i];
     }
+    if(var){
+        var_len=0,var_cnt=0;
+        get_var(param+var_start,PARAM_BUF_SIZE-var_start,param+var_start+1,&var_len,&var_cnt);
+        param_len=var_start+var_cnt;
+        var=0;
+    }
+
     param[param_len]='\0';
 
     // for(int i=0;i<*item_len;i++){
     //     printf("%d %s\n",i,item[i]);
     // }
-    if(!*item_len){
+    if(!item_len){
         return 0;
-    }
-
-
-    if(len>0){
-        switch(buf[len-1]){
-        }
     }
 
     // printf("%s %d\n",buf,len);
     history_add(buf,len);
 
-    item[*item_len]=NULL;
+    item[item_len]=NULL;
     command_func f=is_builtin_cmd(item);
     if(f){
         f(item);
+        item_len=0;
+        item[0]=0;
         return 0;
     }
 
     execute_extern_command(item);
 
-    param_buffer_item_size=0;
-    param_buffer_item[0]=0;
+    item_len=0;
+    item[0]=0;
 
     temp_len=0;
 
@@ -538,7 +560,7 @@ int parse_buf_to_param(
 int execute_extern_command(char * const *argv){
     int pid=fork();
     if(!pid){
-        execvp(argv[0],argv);
+        cmd_execvpe(argv[0],argv,(char*const*)env_vec);
         write(STDERR_FILENO,argv[0],strlen(argv[0]));
         write(STDERR_FILENO,": command not found\n",20);
         _exit(127);

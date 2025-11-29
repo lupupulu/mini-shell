@@ -21,7 +21,7 @@
 #endif
 
 #ifndef VAR_ITEM
-#define VAR_ITEM 256
+#define VAR_ITEM 128
 #endif
 #ifndef VAR_SIZE
 #define VAR_SIZE 1024

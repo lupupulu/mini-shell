@@ -1,6 +1,7 @@
 #include "mnsh.h"
 #include <unistd.h>
 #include <memory.h>
+#include <stdio.h>
 
 
 unsigned int hash_function(const char *str){
@@ -64,7 +65,7 @@ long unsigned int cmd_strlen(const char *str){
     while(str[len++]);
     return len-1;
 }
-int cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
+unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
     unsigned i=0,tmp=num;
     do{
         tmp/=10;
@@ -81,13 +82,45 @@ int cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
     return i;
 }
 
+int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
+    if(!access(file,F_OK)){
+        return execve(file,argv,envp);
+    }
+    const char *path=get_var_s("PATH",4);
+    unsigned j=0,len=cmd_strlen(path),flen=cmd_strlen(file);
+    for(unsigned i=0;i<len;i++){
+        if(path[i]==':'){
+            buffer[j++]='/';
+            memcpy(buffer+j,file,flen);
+            buffer[j+flen]='\0';
+            if(!access(buffer,F_OK)){
+                return execve(buffer,argv,envp);
+            }
+            j=0;
+            continue;
+        }
+        buffer[j++]=path[i];
+    }
+    buffer[j++]='/';
+    memcpy(buffer+j,file,flen);
+    buffer[j+flen]='\0';
+    if(!access(buffer,F_OK)){
+        return execve(buffer,argv,envp);
+    }
+    return -1;
+}
+
 int sh_cd(char *const *argv){
-    unsigned len=0;
-    len=parse_var(buffer,BUF_SIZE,argv[1]);
-    int r=chdir(buffer);
+    int r=1;
+    if(!argv[1]){
+        get_var(buffer,BUF_SIZE,"HOME",NULL,NULL);
+        r=chdir(buffer);
+    }else{
+        r=chdir(argv[1]);
+    }
     if(r){
         write(STDOUT_FILENO,"cd: ",4);
-        write(STDOUT_FILENO,buffer,len);
+        write(STDOUT_FILENO,argv[1],cmd_strlen(argv[1]));
         write(STDOUT_FILENO,": no such file or directory\n",28);
         return 1;
     }
@@ -104,16 +137,42 @@ int sh_pwd(char *const *argv){
     return 0;
 }
 
-int sh_export(char *const *argv){}
-int sh_readonly(char *const *argv){}
-int sh_unset(char *const *argv){}
+int sh_export(char *const *argv){
+    if(!argv[1]){
+        unsigned i=0;
+        while(env_vec[i]){
+            write(STDOUT_FILENO,env_vec[i],cmd_strlen(env_vec[i]));
+            write(STDOUT_FILENO,"\n",1);
+            i++;
+        }
+        return 0;
+    }
+    return set_var(argv[1],VAR_EXPORT)?127:0;
+}
+int sh_readonly(char *const *argv){
+    if(!argv[1]){
+        for(unsigned i=0;i<VAR_ITEM;i++){
+            if(var_umask[i]&VAR_READONLY&&var_umask[i]&VAR_EXIST){
+                write(STDOUT_FILENO,variable[i],cmd_strlen(variable[i]));
+                write(STDOUT_FILENO,"\n",1);
+            }
+        }
+        return 0;
+    }
+    return set_var(argv[1],VAR_READONLY)?127:0;
+}
+int sh_unset(char *const *argv){
+    if(!argv[1]){
+        return 127;
+    }
+    return unset_var(argv[1],cmd_strlen(argv[1]))?127:0;
+}
 
 int sh_read(char *const *argv){}
 int sh_echo(char *const *argv){
-    unsigned i=1,len=0;
+    unsigned i=1;
     while(argv[i]){
-        len=parse_var(buffer,BUF_SIZE,argv[i]);
-        write(STDOUT_FILENO,buffer,len);
+        write(STDOUT_FILENO,argv[i],cmd_strlen(argv[i]));
 
         i++;
         if(argv[i]){
@@ -140,7 +199,7 @@ int sh_exec(char *const *argv){
     if(!argv[1]){
         return 1;
     }
-    execvp(argv[1],&argv[1]);
+    cmd_execvpe(argv[1],&argv[1],(char*const*)env_vec);
     write(STDERR_FILENO,argv[1],cmd_strlen(argv[1]));
     write(STDERR_FILENO,": command not found\n",20);
     return 127;

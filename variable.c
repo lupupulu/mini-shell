@@ -6,25 +6,22 @@
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
 char variable[VAR_ITEM][VAR_SIZE];
-static char var_umask[VAR_ITEM];
-static unsigned var_size;
-char *env_vec[VAR_ITEM];
+unsigned char var_umask[VAR_ITEM];
+char const *env_vec[VAR_ITEM];
 static unsigned env_size;
 
-static inline int find_var(unsigned *loc,const char *var,int env);
-// static inline int find_var_for_get(unsigned *loc,const char *var,int len);
-static inline int unset(unsigned loc);
+static inline unsigned find_var(const char *var,unsigned len);
+static inline int unset_env(const char *env);
+static inline int new_env(const char *env);
 
-static inline int var_strcmp(const char *str1,const char *str2);
-// static inline int var_strcmp_for_get(const char *str1,const char *str2,unsigned len);
+static inline int var_strncmp(const char *str1,const char *str2,unsigned max_len);
 
 unsigned parse_var(char *buf,unsigned len,const char *str){
     unsigned cnt=0,l=0,c=0;
     unsigned i=0;
     if(str[0]=='~'&&(!str[1]||str[1]=='/')){
-        if(get_var(buf,len-cnt,"$HOME",&l,&c)>0){
-            cnt+=c;
-        }
+        get_var(buf,len,"HOME",&l,&c);
+        cnt+=c;
         i++;
     }
 
@@ -37,9 +34,9 @@ unsigned parse_var(char *buf,unsigned len,const char *str){
                 sign=0;
             }
         }else if(str[i]=='$'&&!sign){
-            for(unsigned i=0;i<var_size;i++){
-                printf("%u %s\n",i,env_vec[i]);
-            }
+            // for(unsigned i=0;i<env_size;i++){
+            //     printf("%u %s\n",i,env_vec[i]);
+            // }
             get_var(buf+cnt,len-cnt,str+i+1,&l,&c);
             cnt+=c;
             i+=l+1;
@@ -51,7 +48,6 @@ unsigned parse_var(char *buf,unsigned len,const char *str){
     }
 
     buf[cnt]='\0';
-
     return cnt;
 }
 
@@ -85,132 +81,125 @@ int get_var(char *buf,unsigned buflen,const char *var,unsigned *l,unsigned *c){
     if(l){
         *l=rl;
     }
-    int ret=0;
-    unsigned loc=0,cnt=0;
-    // ret=find_var_for_get(&loc,var,len);
-    if(ret){
-        cnt=MIN(cmd_strlen(variable[loc]),buflen-len);
-        memcpy(buf,variable[loc],cnt);
-        if(*c){
+    unsigned ret=-1;
+    unsigned cnt=0,start=0;
+    ret=find_var(var,len);
+    // printf("%s %u %u\n",var,len,ret);
+    if(ret!=(unsigned)-1){
+        while(variable[ret][start]!='='){
+            start++;
+        }
+        start++;
+        cnt=MIN(cmd_strlen(variable[ret]+start),buflen-len);
+        memmove(buf,variable[ret]+start,cnt);
+        if(c){
             *c=cnt;
         }
-        return var_umask[loc];
+        return var_umask[ret];
     }
-    if(*c){
+    if(c){
         *c=cnt;
     }
     return 0;
 }
-int set_var(const char *var,unsigned len,char umask){
-    unsigned loc=0;
-    int ret=find_var(&loc,var,umask&VAR_EXPORT);
-    if(ret){
-        if(var_umask[loc]&VAR_READONLY){
-            return 1;
+int set_var(const char *var,char umask){
+    int flg=0;
+    unsigned len=0;
+    while(len<BUF_SIZE&&var[len]){
+        if(var[len]=='='){
+            flg=1;
         }
-        if((umask^var_umask[loc])&VAR_EXPORT){
-            unset(loc);
-            return set_var(var,len,umask);
+        len++;
+    }
+
+    unsigned loc=find_var(var,len);
+    if(loc==(unsigned)-1){
+        if(!flg){
+            return 2;
         }
+        for(unsigned i=0;i<VAR_ITEM;i++){
+            if(!(var_umask[i]&VAR_EXIST)){
+                loc=i;
+                break;
+            }
+        }
+    }else if(var_umask[loc]&VAR_READONLY){
+        return 3;
+    }
+
+    if(loc==(unsigned)-1){
+        return 4;
+    }
+
+    if(!flg){
         var_umask[loc]|=umask;
-        parse_var(env_vec[loc],VAR_SIZE,var);
-        // printf("1 %d %s\n",loc,env_vec[loc]);
-        if(umask&VAR_EXPORT){
-            env_size++;
-        }
-        var_size++;
         return 0;
     }
-    unsigned i=0;
-    for(;i<VAR_ITEM;i++){
-        if(!(var_umask[i]&VAR_EXIST)){
-            break;
-        }
+
+    memcpy(variable[loc],var,len);
+    if(var_umask[loc]&VAR_EXPORT&&!umask&VAR_EXPORT){
+        unset_env(variable[loc]);
+    }else if(!var_umask[loc]&VAR_EXPORT&&umask&VAR_EXPORT){
+        new_env(variable[loc]);
     }
-    if(i>=VAR_ITEM){
-        return 2;
-    }
-    var_umask[i]=umask|VAR_EXIST;
-    memcpy(&variable[i][0],var,MIN(cmd_strlen(var),VAR_SIZE));
-    if(umask&VAR_EXPORT){
-        memmove(env_vec+loc+1,env_vec+loc,sizeof(char*)*(var_size-loc+1));
-        env_vec[loc]=&variable[i][0];
-        env_size++;
-    }else{
-        memmove(env_vec+loc+1,env_vec+loc,sizeof(char*)*(var_size-loc));
-        env_vec[loc]=&variable[i][0];
-    }
-    // printf("%s\n",env_vec[loc]);
-    var_size++;
-    // for(unsigned i=0;i<var_size;i++){
-    //     printf("        %u %s\n",i,env_vec[i]);
-    // }
+    var_umask[loc]=VAR_EXIST|umask;
+
     return 0;
 }
 int unset_var(const char *var,unsigned len){
-    unsigned loc=0;
-    int ret=find_var(&loc,var,1);
-    if(!ret){
-        ret=find_var(&loc,var,0);
-        if(!ret){
-            return 1;
+    unsigned loc=find_var(var,cmd_strlen(var));
+    if(loc==(unsigned)-1){
+        return 1;
+    }else if(var_umask[loc]&VAR_READONLY){
+        return 2;
+    }
+    if(var_umask[loc]&VAR_EXPORT){
+        unset_env(variable[loc]);
+    }
+    var_umask[loc]=0;
+    return 0;
+}
+
+const char *get_var_s(const char *var,unsigned len){
+    unsigned r=find_var(var,len);
+    if(r==(unsigned)-1){
+        return NULL;
+    }
+    return variable[r];
+}
+
+static inline unsigned find_var(const char *var,unsigned len){
+    for(unsigned i=0;i<VAR_ITEM;i++){
+        if(var_umask[i]&VAR_EXIST&&!var_strncmp(var,variable[i],len)){
+            return i;
         }
     }
-    if(ret&VAR_READONLY){
-        return 1;
-    }
-    unset(loc);
-    return 0;
+    return -1;
 }
-
-static inline int find_var(unsigned *loc,const char *var,int env){
-    unsigned start=env?0:env_size;
-    unsigned end=env?env_size:var_size;
-
-    if(start>=end){
-        *loc=start;
-        return 0;
-    }
-    unsigned l=start,r=end;
-    unsigned mid=0;
-    while(l<r){
-        mid=(l+r)/2;
-        int cmp=var_strcmp(env_vec[mid],var);
-        if(cmp==0){
-            *loc=mid;
-            return var_umask[mid];
-        }else if(cmp>0){
-            l=mid+1;
-        }else{
-            r=mid;
+static inline int unset_env(const char *env){
+    for(unsigned i=0;i<VAR_ITEM;i++){
+        if(env==env_vec[i]){
+            if(var_umask[i]&VAR_READONLY){
+                return 2;
+            }
+            memmove(env_vec+i,env_vec+i+1,sizeof(char*)*(env_size-i));
+            env_size--;
+            return 0;
         }
     }
-    if(!mid){
-        *loc=0;
-    }else{
-        *loc=mid+1;
-    }
-    return 0;
+    return 1;
 }
 
-static inline int unset(unsigned loc){
-    if(*(env_vec[loc]-1)&VAR_READONLY){
+static inline int new_env(const char *env){
+    if(env_size+1>=VAR_ITEM){
         return 1;
     }
-    *(env_vec[loc]-1)=0;
-    if(loc<env_size){
-        memmove(env_vec+loc,env_vec+loc+1,sizeof(char*)*(var_size-loc+1));
-    }else{
-        memmove(env_vec+loc+1,env_vec+loc+2,sizeof(char*)*(var_size-loc+2));
-    }
-    var_size--;
-    if(loc<env_size){
-        env_size--;
-    }
+    env_vec[env_size++]=env;
+    env_vec[env_size]=NULL;
     return 0;
 }
 
-static inline int var_strcmp(const char *str1,const char *str2){
+static inline int var_strncmp(const char *str1,const char *str2,unsigned max_len){
     if(!str1){
         return -1;
     }
@@ -219,15 +208,15 @@ static inline int var_strcmp(const char *str1,const char *str2){
     }
     unsigned len=0;
     char l1,l2;
-    while(str1[len]==str2[len]&&str1[len]!=' '&&str2[len]!=' '&&str1[len]!='='&&str2[len]!='='){
+    while(len<max_len&&str1[len]==str2[len]&&str1[len]!=' '&&str2[len]!=' '&&str1[len]!='='&&str2[len]!='='){
         len++;
     }
     l1=str1[len];
     l2=str2[len];
-    if(l1=='='){
+    if(l1=='='||len==max_len){
         l1='\0';
     }
-    if(l2=='='){
+    if(l2=='='||len==max_len){
         l2='\0';
     }
     if(l1>l2){
