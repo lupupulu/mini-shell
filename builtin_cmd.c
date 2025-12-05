@@ -168,7 +168,34 @@ int sh_unset(char *const *argv){
     return unset_var(argv[1],cmd_strlen(argv[1]))?127:0;
 }
 
-int sh_read(char *const *argv){}
+int sh_read(char *const *argv){
+    if(!argv[1]){
+        return 127;
+    }
+    int echo=1;
+    int i=1;
+    if(argv[1][0]=='-'){
+        i++;
+        switch(argv[1][1]){
+        case 's':
+            echo=0;
+            break;
+        case 'p':
+            if(!argv[2]){
+                return 127;
+            }
+            write(STDOUT_FILENO,argv[2],cmd_strlen(argv[2]));
+            i++;
+            break;
+        default:
+            return 127;
+        }
+    }
+    if(!argv[i]){
+        return 127;
+    }
+    return 0;
+}
 int sh_echo(char *const *argv){
     unsigned i=1;
     while(argv[i]){

@@ -3,6 +3,8 @@
 
 #include "config.h"
 
+int input(char *buffer,unsigned bufsiz,unsigned *rlen);
+
 int cmd_strcmp(const char *str1,const char *str2);
 long unsigned int cmd_strlen(const char *str);
 unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num);
