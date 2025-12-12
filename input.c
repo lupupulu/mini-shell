@@ -1,6 +1,15 @@
 #include "mnsh.h"
 #include <unistd.h>
+#include <memory.h>
 
+static int buffer_is_saved=0;
+static int now_is_bufffer=1;
+static int echo=1;
+
+int handle_escape_sequence(unsigned *pos,unsigned *len);
+int handle_invisible_char(char c,unsigned *pos,unsigned *len);
+
+#define output(s,l) if(echo)write(STDOUT_FILENO,s,l)
 static inline void insert_str(
     char *buf,
     unsigned pos,
@@ -12,11 +21,14 @@ static inline void insert(char *buf,unsigned pos,unsigned len,char c);
 static inline void backspace(char *buf,unsigned pos,unsigned len);
 static inline void delete(char *buf,unsigned pos,unsigned len);
 
-int input(char *buffer,unsigned bufsiz,unsigned *rlen){
+int input(char *buffer,unsigned bufsiz,unsigned *rlen,unsigned umask){
     char c=0;
-    int ret=0,con=0;
+    int ret=0;
     unsigned len=0;
     unsigned pos=0;
+
+    echo=umask&IN_ECHO;
+
     while(1){
         ret=read(STDIN_FILENO,&c,1);
         // printf("%d\n",c);
@@ -25,25 +37,29 @@ int input(char *buffer,unsigned bufsiz,unsigned *rlen){
         }
         if(c==0x04||ret==0){
             write(STDOUT_FILENO,"\nexit\n",6);
-            set_terminal_echo(1);
             return -1;
         }
         if(c=='\n'){
             write(STDOUT_FILENO,"\n",1);
-            
+            if(buffer_is_saved){
+                buffer_is_saved=0;
+                history_remove();
+            }
+            buffer_is_saved=0;
+            now_is_bufffer=1;
             if(rlen){
                 *rlen=len;
             }
             return 0;
-        }else if(c==0x1b){
-            ret=handle_escape_sequence();
+        }else if(umask&IN_HANDLE_CHAR&&c==0x1b){
+            ret=handle_escape_sequence(&pos,&len);
 
             if(ret<0) return 127;
             else if(ret>0) continue;
             else c='[';
 
-        }else if(c<0x20||c==127){
-            handle_invisible_char(c);
+        }else if(umask&IN_HANDLE_CHAR&&(c<0x20||c==127)){
+            handle_invisible_char(c,&pos,&len);
             continue;
         }
         if(len<BUF_SIZE){
@@ -58,7 +74,7 @@ int input(char *buffer,unsigned bufsiz,unsigned *rlen){
     return 0;
 }
 
-int handle_escape_sequence(void){
+int handle_escape_sequence(unsigned *pos,unsigned *len){
     char c,tmp[8];
     int ret=read(0,&c,1);
 
@@ -73,13 +89,13 @@ int handle_escape_sequence(void){
         if(ret!=1)return -1;
         switch(c){
         case 'A':
-            // printf("%d %d\n",buffer_is_saved,now_is_bufffer);
+            if(!echo){
+                break;
+            }
             if(!buffer_is_saved){
-                history_add(buffer,len);
-                // printf("saved\n");
+                history_add(buffer,*len);
                 buffer_is_saved=1;
                 now_is_bufffer=0;
-                // get_last_history(NULL);
             }
             if(get_last_history(buffer)){
                 return 1;
@@ -88,11 +104,14 @@ int handle_escape_sequence(void){
             write(STDOUT_FILENO,&start,1);
             write(STDOUT_FILENO," ",1);
 
-            len=strlen(buffer);
-            pos=len;
-            write(STDOUT_FILENO,buffer,len);
+            *len=strlen(buffer);
+            *pos=*len;
+            write(STDOUT_FILENO,buffer,*len);
             return 1;
         case 'B':
+            if(!echo){
+                break;
+            }
             if((ret=get_next_history(buffer))!=0){
                 if(!buffer_is_saved){
                     return 1;
@@ -102,9 +121,10 @@ int handle_escape_sequence(void){
             write(STDOUT_FILENO,"\r\033[K",5);
             write(STDOUT_FILENO,&start,1);
             write(STDOUT_FILENO," ",1);
-            len=strlen(buffer);
-            pos=len;
-            write(STDOUT_FILENO,buffer,len);
+
+            *len=strlen(buffer);
+            *pos=*len;
+            write(STDOUT_FILENO,buffer,*len);
 
             if(ret){
                 history_remove();
@@ -114,42 +134,42 @@ int handle_escape_sequence(void){
 
             return 1;
         case 'C':
-            if(pos<len){
-                write(STDOUT_FILENO,"\033[C",3);
-                pos++;
+            if(*pos<*len){
+                output("\033[C",3);
+                (*pos)++;
             }
             return 1;
         case 'D':
-            if(pos>0){
-                write(STDOUT_FILENO,"\033[D",3);
-                pos--;
+            if(*pos>0){
+                output("\033[D",3);
+                (*pos)--;
             }
             return 1;
         case 'H':
-            while(pos>0){
-                write(STDOUT_FILENO,"\033[D",3);
-                pos--;
+            while(*pos>0){
+                output("\033[D",3);
+                (*pos)--;
             }
             return 1;
         case 'F':
-            while(pos<len){
-                write(STDOUT_FILENO,"\033[C",3);
-                pos++;
+            while(*pos<*len){
+                output("\033[C",3);
+                (*pos)++;
             }
             return 1;
         case '3':
             ret=read(0,&c,1);
             if(ret==1&&c=='~'){
-                delete(buffer,pos,len);
-                if(pos<len){
-                    len--;
+                delete(buffer,*pos,*len);
+                if(*pos<*len){
+                    (*len)--;
                 }
             }else{
                 memcpy(tmp,"[[3",3);
                 tmp[3]=c;
-                insert_str(buffer,pos,len,tmp,4);
-                len+=4;
-                pos+=4;
+                insert_str(buffer,*pos,*len,tmp,4);
+                (*len)+=4;
+                (*pos)+=4;
                 return 1;
             }
             return 1;
@@ -159,9 +179,9 @@ int handle_escape_sequence(void){
             memcpy(tmp,"[[1",3);
             tmp[3]=c;
             if(c!=';'){
-                insert_str(buffer,pos,len,tmp,4);
-                len+=4;
-                pos+=4;
+                insert_str(buffer,*pos,*len,tmp,4);
+                (*len)+=4;
+                (*pos)+=4;
                 return 1;
             }
             ret=read(0,&c,1);
@@ -172,43 +192,43 @@ int handle_escape_sequence(void){
                 tmp[5]=c;
                 if(ret!=1) return -1;
                 if(c=='D'){
-                    if(pos&&buffer[pos-1]==' '){
+                    if(*pos&&buffer[*pos-1]==' '){
                         space=1;
                     }
                     while(pos){
-                        if(space&&buffer[pos-1]!=' '){
+                        if(space&&buffer[*pos-1]!=' '){
                             break;
                         }
-                        if(!space&&buffer[pos-1]==' '){
+                        if(!space&&buffer[*pos-1]==' '){
                             break;
                         }
-                        write(STDOUT_FILENO,"\033[D",3);
-                        pos--;
+                        output("\033[D",3);
+                        (*pos)--;
                     }
                 }else if(c=='C'){
-                    if(pos<len&&buffer[pos+1]==' '){
+                    if(*pos<*len&&buffer[*pos+1]==' '){
                         space=1;
                     }
-                    while(pos<len){
-                        if(space&&buffer[pos+1]!=' '){
+                    while(*pos<*len){
+                        if(space&&buffer[*pos+1]!=' '){
                             break;
                         }
-                        if(!space&&buffer[pos+1]==' '){
+                        if(!space&&buffer[*pos+1]==' '){
                             break;
                         }
-                        write(STDOUT_FILENO,"\033[C",3);
-                        pos++;
+                        output("\033[C",3);
+                        (*pos)++;
                     }
                 }else{
-                    insert_str(buffer,pos,len,tmp,6);
-                    len+=6;
-                    pos+=6;
+                    insert_str(buffer,*pos,*len,tmp,6);
+                    (*len)+=6;
+                    (*pos)+=6;
                     return 1;
                 }
             }else{
-                insert_str(buffer,pos,len,tmp,5);
-                len+=5;
-                pos+=5;
+                insert_str(buffer,*pos,*len,tmp,5);
+                (*len)+=5;
+                (*pos)+=5;
                 return 1;
             }
             return 1;
@@ -219,114 +239,65 @@ int handle_escape_sequence(void){
 }
 
 
-int handle_invisible_char(char c){
+int handle_invisible_char(char c,unsigned *pos,unsigned *len){
     switch(c){
     case 0x01:
-        while(pos>0){
-            pos--;
-            write(STDOUT_FILENO,"\b",1);
+        while(*pos>0){
+            (*pos)--;
+            output("\b",1);
         }
         break;
     case 0x02:
-        if(pos>0){
-            pos--;
-            write(STDOUT_FILENO,"\b",1);
+        if(*pos>0){
+            (*pos)--;
+            output("\b",1);
         }
         break;
     case 0x06:
-        if(pos<len){
-            pos++;
-            write(STDOUT_FILENO,&buffer[pos-1],1);
+        if(*pos<*len){
+            (*pos)++;
+            output(&buffer[*pos-1],1);
         }
         break;
     case 0x08:
     case 0x7f:
-        backspace(buffer,pos,len);
-        if(pos){
-            len--;
-            pos--;
+        backspace(buffer,*pos,*len);
+        if(*pos){
+            (*len)--;
+            (*pos)--;
         }
         break;
     case 0x17:
         int space=0;
-        if(pos&&buffer[pos-1]==' '){
+        if(*pos&&buffer[*pos-1]==' '){
             space=1;
         }
-        while(pos){
-            if(space&&buffer[pos-1]!=' '){
+        while(*pos){
+            if(space&&buffer[*pos-1]!=' '){
                 break;
             }
-            if(!space&&buffer[pos-1]==' '){
+            if(!space&&buffer[*pos-1]==' '){
                 break;
             }
-            backspace(buffer,pos,len);
-            len--;
-            pos--;
+            backspace(buffer,*pos,*len);
+            (*len)--;
+            (*pos)--;
         }
         break;
     case 0x0b:
-        while(pos<len){
-            write(STDOUT_FILENO," ",1);
+        while(*pos<*len){
+            output(" ",1);
             pos++;
         }
-        while(pos>0&&buffer[pos-1]!='\n'){
-            pos--;
-            write(STDOUT_FILENO,"\b \b",3);
+        while(*pos>0&&buffer[*pos-1]!='\n'){
+            (*pos)--;
+            output("\b \b",3);
         }
         break;
     }
     return 0;
 }
 
-unsigned handle_backslash(char *r,const char *c){
-    if(c[0]>='0'&&c[0]<='9'){
-        *r=0;
-        register unsigned i=0;
-        while(i<3){
-            if(c[i]<'0'||c[i]>'9'){
-                break;
-            }
-            *r*=10;
-            *r+=c[i]-'0';
-            i++;
-        }
-        return i;
-    }else if(c[0]=='x'){
-        *r=0;
-        register unsigned i=0;
-        while(i<2){
-            if(c[i]>='0'&&c[i]<='9'){
-                *r*=16;
-                *r+=c[i]-'0';
-            }else if(c[i]>='A'&&c[i]<='F'){
-                *r*=16;
-                *r+=c[i]-'A';
-            }else if(c[i]>='a'&&c[i]<='f'){
-                *r*=16;
-                *r+=c[i]-'a';
-            }else{
-                break;
-            }
-            i++;
-        }
-        return i;
-    }
-    switch(c[0]){
-    case 't':
-        *r='\t';
-        return 1;
-    case 'n':
-        *r='\t';
-        return 1;
-    case 'r':
-        *r='\r';
-        return 1;
-    default:
-        *r=c[0];
-        return 1;
-    }
-    return 0;
-}
 
 static inline void insert_str(
     char *buf,
@@ -340,10 +311,13 @@ static inline void insert_str(
     }
     if(pos==len){
         memcpy(buf+len,c,c_len);
-        write(STDOUT_FILENO,c,c_len);
+        output(c,c_len);
     }else{
         memmove(buf+pos+c_len,buf+pos,len-pos);
         memcpy(buf+pos,c,c_len);
+        if(!echo){
+            return ;
+        }
         write(STDOUT_FILENO,buf+pos,len-pos+c_len);
         for(int i=0;i<len-pos;i++){
             write(STDOUT_FILENO,"\b",1);
@@ -356,10 +330,13 @@ static inline void insert_str(
 static inline void insert(char *buf,unsigned pos,unsigned len,char c){
     if(pos==len){
         buf[pos]=c;
-        write(STDOUT_FILENO,&c,1);
+        output(&c,1);
     }else{
         memmove(buf+pos+1,buf+pos,len-pos);
         buf[pos]=c;
+        if(!echo){
+            return ;
+        }
         write(STDOUT_FILENO,buf+pos,len-pos+1);
         for(int i=0;i<len-pos;i++){
             write(STDOUT_FILENO,"\b",1);
@@ -372,10 +349,13 @@ static inline void backspace(char *buf,unsigned pos,unsigned len){
         return ;
     }
     if(pos==len){
-        write(STDOUT_FILENO,"\b \b",3);
+        output("\b \b",3);
         return ;
     }
     memmove(buf+pos-1,buf+pos,len-pos);
+    if(!echo){
+        return ;
+    }
     write(STDOUT_FILENO,"\b",1);
     write(STDOUT_FILENO,buf+pos-1,len-pos);
     write(STDOUT_FILENO," ",1);
@@ -389,10 +369,13 @@ static inline void delete(char *buf,unsigned pos,unsigned len){
         return ;
     }
     if(pos==len-1){
-        write(STDOUT_FILENO," \b",2);
+        output(" \b",2);
         return ;
     }
     memmove(buf+pos,buf+pos+1,len-pos);
+    if(!echo){
+        return ;
+    }
     write(STDOUT_FILENO,buf+pos,len-pos);
     write(STDOUT_FILENO," ",1);
     for(int i=0;i<len-pos;i++){

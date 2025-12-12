@@ -15,11 +15,11 @@
 static unsigned int item_len=0;
 
 char buffer[BUF_SIZE];
-static int buffer_is_saved=0,now_is_bufffer=1;
-static char start='$';
+char start='$';
 
 int set_terminal_echo(int enable);
 int execute_extern_command(char * const *argv);
+unsigned handle_backslash(char *r,const char *c);
 
 int parse_buf_to_param(char *buf,unsigned len);
 
@@ -38,13 +38,13 @@ int main(int argc,const char **argv,char **env){
     }
 
     unsigned rlen=0;
-    int r=0,con=0;
+    int con=0;
 
     while(1){
         write(STDOUT_FILENO,&start,1);
         write(STDOUT_FILENO," ",1);
         buffer[0]='\0';
-        int r=input(buffer,BUF_SIZE,&rlen);
+        int r=input(buffer,BUF_SIZE,&rlen,IN_ECHO|IN_HANDLE_CHAR);
         switch(r){
         case 127:
             return 127;
@@ -55,12 +55,6 @@ int main(int argc,const char **argv,char **env){
             if(!con){
                 item_len=0;
             }
-            if(buffer_is_saved){
-                buffer_is_saved=0;
-                history_remove();
-            }
-            buffer_is_saved=0;
-            now_is_bufffer=1;
             r=parse_buf_to_param(buffer,rlen);
             con=0;
             if(r==1){
@@ -235,6 +229,56 @@ int parse_buf_to_param(char *buf,unsigned len){
 
     temp_len=0;
 
+    return 0;
+}
+
+unsigned handle_backslash(char *r,const char *c){
+    if(c[0]>='0'&&c[0]<='9'){
+        *r=0;
+        register unsigned i=0;
+        while(i<3){
+            if(c[i]<'0'||c[i]>'9'){
+                break;
+            }
+            *r*=10;
+            *r+=c[i]-'0';
+            i++;
+        }
+        return i;
+    }else if(c[0]=='x'){
+        *r=0;
+        register unsigned i=0;
+        while(i<2){
+            if(c[i]>='0'&&c[i]<='9'){
+                *r*=16;
+                *r+=c[i]-'0';
+            }else if(c[i]>='A'&&c[i]<='F'){
+                *r*=16;
+                *r+=c[i]-'A';
+            }else if(c[i]>='a'&&c[i]<='f'){
+                *r*=16;
+                *r+=c[i]-'a';
+            }else{
+                break;
+            }
+            i++;
+        }
+        return i;
+    }
+    switch(c[0]){
+    case 't':
+        *r='\t';
+        return 1;
+    case 'n':
+        *r='\t';
+        return 1;
+    case 'r':
+        *r='\r';
+        return 1;
+    default:
+        *r=c[0];
+        return 1;
+    }
     return 0;
 }
 

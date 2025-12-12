@@ -105,13 +105,13 @@ int sh_history(char *const *argv){
         buffer[len++]=' ';
         buffer[len++]=' ';
 
-        tmp=cmd_strlen(history+i);
+        tmp=strlen(history+i);
         memcpy(buffer+len,history+i,MIN(tmp,BUF_SIZE-len-1));
         len+=MIN(tmp,BUF_SIZE-len-1);
         buffer[len++]='\n';
 
         write(STDOUT_FILENO,buffer,len);
-        i+=cmd_strlen(history+i);
+        i+=strlen(history+i);
         i+=3;
         cnt++;
     }

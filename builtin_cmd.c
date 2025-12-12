@@ -26,13 +26,13 @@ command_func is_builtin_cmd(char *const *argv){
         }
     }
 
-    if(!cmd_strcmp(builtin_cmd_hash[hash].key,argv[0])){
+    if(builtin_cmd_hash[hash].key&&!strcmp(builtin_cmd_hash[hash].key,argv[0])){
         return builtin_cmd_hash[hash].f;
     }
 
     unsigned now=builtin_cmd_hash[hash].next;
     while(now){
-        if(!cmd_strcmp(builtin_cmd[now].key,argv[0])){
+        if(builtin_cmd_hash[hash].key&&!strcmp(builtin_cmd[now].key,argv[0])){
             return builtin_cmd[now].f;
         }
         now=builtin_cmd[now].next;
@@ -42,29 +42,7 @@ command_func is_builtin_cmd(char *const *argv){
 }
 
 
-int cmd_strcmp(const char *str1,const char *str2){
-    if(!(str1&&str2)){
-        return -1;
-    }
-    unsigned len=0;
-    while(str1[len]&&str2[len]&&str1[len]==str2[len]){
-        len++;
-    }
-    if(str1[len]>str2[len]){
-        return 1;
-    }else if(str1[len]<str2[len]){
-        return -1;
-    }
-    return 0;
-}
-long unsigned int cmd_strlen(const char *str){
-    if(!str){
-        return 0;
-    }
-    long unsigned int len=0;
-    while(str[len++]);
-    return len-1;
-}
+
 unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
     unsigned i=0,tmp=num;
     do{
@@ -87,7 +65,7 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
         return execve(file,argv,envp);
     }
     const char *path=get_var_s("PATH",4);
-    unsigned j=0,len=cmd_strlen(path),flen=cmd_strlen(file);
+    unsigned j=0,len=strlen(path),flen=strlen(file);
     for(unsigned i=0;i<len;i++){
         if(path[i]==':'){
             buffer[j++]='/';
@@ -120,7 +98,7 @@ int sh_cd(char *const *argv){
     }
     if(r){
         write(STDOUT_FILENO,"cd: ",4);
-        write(STDOUT_FILENO,argv[1],cmd_strlen(argv[1]));
+        write(STDOUT_FILENO,argv[1],strlen(argv[1]));
         write(STDOUT_FILENO,": no such file or directory\n",28);
         return 1;
     }
@@ -132,7 +110,7 @@ int sh_pwd(char *const *argv){
         write(STDOUT_FILENO,"pwd: failed\n",12);
         return 1;
     }
-    write(STDOUT_FILENO,buffer,cmd_strlen(buffer));
+    write(STDOUT_FILENO,buffer,strlen(buffer));
     write(STDOUT_FILENO,"\n",1);
     return 0;
 }
@@ -141,7 +119,7 @@ int sh_export(char *const *argv){
     if(!argv[1]){
         unsigned i=0;
         while(env_vec[i]){
-            write(STDOUT_FILENO,env_vec[i],cmd_strlen(env_vec[i]));
+            write(STDOUT_FILENO,env_vec[i],strlen(env_vec[i]));
             write(STDOUT_FILENO,"\n",1);
             i++;
         }
@@ -153,7 +131,7 @@ int sh_readonly(char *const *argv){
     if(!argv[1]){
         for(unsigned i=0;i<VAR_ITEM;i++){
             if(var_umask[i]&VAR_READONLY&&var_umask[i]&VAR_EXIST){
-                write(STDOUT_FILENO,variable[i],cmd_strlen(variable[i]));
+                write(STDOUT_FILENO,variable[i],strlen(variable[i]));
                 write(STDOUT_FILENO,"\n",1);
             }
         }
@@ -165,41 +143,58 @@ int sh_unset(char *const *argv){
     if(!argv[1]){
         return 127;
     }
-    return unset_var(argv[1],cmd_strlen(argv[1]))?127:0;
+    return unset_var(argv[1],strlen(argv[1]))?127:0;
 }
 
 int sh_read(char *const *argv){
     if(!argv[1]){
         return 127;
     }
-    int echo=1;
+    int umask=IN_ECHO|IN_HANDLE_CHAR;
     int i=1;
-    if(argv[1][0]=='-'){
-        i++;
-        switch(argv[1][1]){
-        case 's':
-            echo=0;
-            break;
-        case 'p':
-            if(!argv[2]){
+    const char *var=NULL;
+    while(argv[i]){
+        if(argv[i][0]=='-'){
+            switch(argv[i][1]){
+            case 's':
+                umask&=~IN_ECHO;
+                break;
+            case 'r':
+                umask&=~IN_HANDLE_CHAR;
+                break;
+            case 'p':
+                if(!argv[i+1]||argv[i+1][0]=='-'){
+                    return 127;
+                }
+                write(STDOUT_FILENO,argv[i+1],strlen(argv[i+1]));
+                i++;
+                break;
+            default:
                 return 127;
             }
-            write(STDOUT_FILENO,argv[2],cmd_strlen(argv[2]));
-            i++;
-            break;
-        default:
-            return 127;
+        }else{
+            if(var){
+                return 127;
+            }
+            var=argv[i];
         }
+        i++;
     }
-    if(!argv[i]){
+    unsigned vlen=strlen(var);
+    unsigned len=0;
+    int r=input(buffer+vlen+1,BUF_SIZE-vlen-1,&len,umask);
+    if(!r){
         return 127;
     }
+    memcpy(buffer,var,vlen);
+    buffer[vlen]='=';
+    set_var(buffer,0);
     return 0;
 }
 int sh_echo(char *const *argv){
     unsigned i=1;
     while(argv[i]){
-        write(STDOUT_FILENO,argv[i],cmd_strlen(argv[i]));
+        write(STDOUT_FILENO,argv[i],strlen(argv[i]));
 
         i++;
         if(argv[i]){
@@ -210,36 +205,71 @@ int sh_echo(char *const *argv){
     }
     return 0;
 }
-int sh_printf(char *const *argv){}
 
-int sh_jobs(char *const *argv){}
-int sh_fg(char *const *argv){}
-int sh_bg(char *const *argv){}
-int sh_wait(char *const *argv){}
+int sh_jobs(char *const *argv){
+    return 0;
+}
+int sh_fg(char *const *argv){
+    return 0;
+}
+int sh_bg(char *const *argv){
+    return 0;
+}
+int sh_wait(char *const *argv){
+    return 0;
+}
 
-int sh_test(char *const *argv){}
-int sh_true(char *const *argv){}
-int sh_false(char *const *argv){}
+int sh_test(char *const *argv){
+    return 0;
+}
+int sh_true(char *const *argv){
+    return 0;
+}
+int sh_false(char *const *argv){
+    return 0;
+}
 
-int sh_command(char *const *argv){}
+int sh_command(char *const *argv){
+    return 0;
+}
 int sh_exec(char *const *argv){
     if(!argv[1]){
         return 1;
     }
     cmd_execvpe(argv[1],&argv[1],(char*const*)env_vec);
-    write(STDERR_FILENO,argv[1],cmd_strlen(argv[1]));
+    write(STDERR_FILENO,argv[1],strlen(argv[1]));
     write(STDERR_FILENO,": command not found\n",20);
     return 127;
 }
-int sh_eval(char *const *argv){}
-int sh_times(char *const *argv){}
+int sh_eval(char *const *argv){
+    return 0;
+}
+int sh_times(char *const *argv){
+    return 0;
+}
 
-int sh_trap(char *const *argv){}
-int sh_set(char *const *argv){}
-int sh_shift(char *const *argv){}
-int sh_getopts(char *const *argv){}
+int sh_trap(char *const *argv){
+    return 0;
+}
+int sh_set(char *const *argv){
+    return 0;
+}
+int sh_shift(char *const *argv){
+    return 0;
+}
+int sh_getopts(char *const *argv){
+    return 0;
+}
 
-int sh_umask(char *const *argv){}
-int sh_alias(char *const *argv){}
-int sh_unalias(char *const *argv){}
-int sh_type(char *const *argv){}
+int sh_umask(char *const *argv){
+    return 0;
+}
+int sh_alias(char *const *argv){
+    return 0;
+}
+int sh_unalias(char *const *argv){
+    return 0;
+}
+int sh_type(char *const *argv){
+    return 0;
+}

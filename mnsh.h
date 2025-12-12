@@ -3,7 +3,9 @@
 
 #include "config.h"
 
-int input(char *buffer,unsigned bufsiz,unsigned *rlen);
+#define IN_ECHO        0b01
+#define IN_HANDLE_CHAR 0b10
+int input(char *buffer,unsigned bufsiz,unsigned *rlen,unsigned umask);
 
 int cmd_strcmp(const char *str1,const char *str2);
 long unsigned int cmd_strlen(const char *str);
@@ -25,6 +27,7 @@ typedef struct {
 
 extern hash_pair_t builtin_cmd[];
 extern hash_pair_t builtin_cmd_hash[HASH_SIZE];
+extern char start;
 extern char buffer[BUF_SIZE];
 extern char const *env_vec[VAR_ITEM];
 extern char variable[VAR_ITEM][VAR_SIZE];
@@ -54,7 +57,6 @@ int sh_unset(char *const *argv);
 
 int sh_read(char *const *argv);
 int sh_echo(char *const *argv);
-int sh_printf(char *const *argv);
 
 int sh_jobs(char *const *argv);
 int sh_fg(char *const *argv);

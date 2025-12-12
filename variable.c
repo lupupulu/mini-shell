@@ -90,7 +90,7 @@ int get_var(char *buf,unsigned buflen,const char *var,unsigned *l,unsigned *c){
             start++;
         }
         start++;
-        cnt=MIN(cmd_strlen(variable[ret]+start),buflen-len);
+        cnt=MIN(strlen(variable[ret]+start),buflen-len);
         memmove(buf,variable[ret]+start,cnt);
         if(c){
             *c=cnt;
@@ -147,7 +147,7 @@ int set_var(const char *var,char umask){
     return 0;
 }
 int unset_var(const char *var,unsigned len){
-    unsigned loc=find_var(var,cmd_strlen(var));
+    unsigned loc=find_var(var,strlen(var));
     if(loc==(unsigned)-1){
         return 1;
     }else if(var_umask[loc]&VAR_READONLY){
