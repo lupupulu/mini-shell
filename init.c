@@ -5,6 +5,9 @@ hash_pair_t builtin_cmd[HASH_SIZE];
 unsigned int extra_builtin_real=1;
 hash_pair_t builtin_cmd_hash[HASH_SIZE];
 
+char *item[PARAM_BUF_ITEM];
+unsigned item_len;
+
 char buffer[BUF_SIZE];
 
 char start='$';

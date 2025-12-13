@@ -5,14 +5,8 @@
 #include "mnsh.h"
 #include <stdio.h>
 
-#define IS_LEGAL(c) (\
-        ((c)>='A'&&(c)<='Z')||\
-        ((c)>='a'&&(c)<='z')||\
-        ((c)>='0'&&(c)<='9')||\
-        (c)=='_'\
-    )
-
-static unsigned int item_len=0;
+static char *last_item[PARAM_BUF_ITEM];
+static unsigned last_item_len;
 
 char buffer[BUF_SIZE];
 char start='$';
@@ -102,6 +96,7 @@ int set_terminal_echo(int enable){
 
 int parse_buf_to_param(char *buf,unsigned len){
     static char param[PARAM_BUF_SIZE];
+
     static char *item[PARAM_BUF_ITEM];
     static unsigned item_len;
 
@@ -135,18 +130,24 @@ int parse_buf_to_param(char *buf,unsigned len){
     char sign=0;
     int note=0;
 
-    int var=0;
+    int var=0,sp_var=0,var_brackets=0;
     unsigned var_start=0;
     unsigned var_len,var_cnt;
 
     int ret=0;
 
     for(unsigned int i=0;i<len&&item_len<PARAM_BUF_ITEM-1&&param_len<PARAM_BUF_SIZE;i++){
-        if(var&&!IS_LEGAL(buf[i])){
+        if(
+            (var&&!var_brackets&&!(IS_LEGAL(buf[i])||sp_var)&&buf[i]!='{')||
+            var_brackets==2
+        ){
             var_len=0,var_cnt=0;
+            param[param_len]='\0';
             get_var(param+var_start,PARAM_BUF_SIZE-var_start-1,param+var_start+1,&var_len,&var_cnt);
             param_len=var_start+var_cnt;
             var=0;
+            var_brackets=0;
+            sp_var=0;
         }
         if(buf[i]==' '&&!sign){
             if(!skip_flg){
@@ -154,7 +155,7 @@ int parse_buf_to_param(char *buf,unsigned len){
                 param[param_len++]='\0';
             }
             continue;
-        }else if(buf[i]=='#'){
+        }else if(!var_brackets&&buf[i]=='#'){
             if(!sign){
                 break;
             }
@@ -172,6 +173,17 @@ int parse_buf_to_param(char *buf,unsigned len){
         }else if(sign!='\''&&buf[i]=='$'){
             var=1;
             var_start=param_len;
+        }else if(var&&buf[i]=='{'){
+            var_brackets=1;
+        }else if(var_brackets==1&&buf[i]=='}'){
+            var_brackets=2;
+        }
+        if(
+            IS_SPECIAL_VARIABLE(buf[i])&&
+            ((var&&!var_brackets&&var_start==i-1)||
+            (var_brackets==1&&var_start==i-2))
+        ){
+            sp_var=1;
         }
         if(skip_flg){
             skip_flg=0;
@@ -196,6 +208,7 @@ int parse_buf_to_param(char *buf,unsigned len){
     }
     if(var){
         var_len=0,var_cnt=0;
+        param[param_len]='\0';
         get_var(param+var_start,PARAM_BUF_SIZE-var_start,param+var_start+1,&var_len,&var_cnt);
         param_len=var_start+var_cnt;
         var=0;
@@ -270,7 +283,7 @@ unsigned handle_backslash(char *r,const char *c){
         *r='\t';
         return 1;
     case 'n':
-        *r='\t';
+        *r='\n';
         return 1;
     case 'r':
         *r='\r';

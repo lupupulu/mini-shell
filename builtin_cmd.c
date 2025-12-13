@@ -60,6 +60,20 @@ unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
     return i;
 }
 
+unsigned cmd_str_to_unsigned(const char *str,unsigned long size){
+    unsigned r=0,i=0;
+    while(i<size){
+        if(str[i]<'0'||str[i]>'9'){
+            r=-1;
+            break;
+        }
+        r*=10;
+        r+=str[i]+'0';
+        i++;
+    }
+    return r;
+}
+
 int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
     if(!access(file,F_OK)){
         return execve(file,argv,envp);

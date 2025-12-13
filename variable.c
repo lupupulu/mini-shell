@@ -5,6 +5,8 @@
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
+
+
 char variable[VAR_ITEM][VAR_SIZE];
 unsigned char var_umask[VAR_ITEM];
 char const *env_vec[VAR_ITEM];
@@ -15,6 +17,8 @@ static inline int unset_env(const char *env);
 static inline int new_env(const char *env);
 
 static inline int var_strncmp(const char *str1,const char *str2,unsigned max_len);
+
+static inline int handle_special_char(char *buf,unsigned buflen,char c);
 
 unsigned parse_var(char *buf,unsigned len,const char *str){
     unsigned cnt=0,l=0,c=0;
@@ -52,7 +56,7 @@ unsigned parse_var(char *buf,unsigned len,const char *str){
 }
 
 int get_var(char *buf,unsigned buflen,const char *var,unsigned *l,unsigned *c){
-    unsigned len=0,rl=0;
+    unsigned len=0,rl=0,cnt=0;
     if(var[0]=='{'){
         var=var+1;
         rl++;
@@ -68,23 +72,25 @@ int get_var(char *buf,unsigned buflen,const char *var,unsigned *l,unsigned *c){
         }
         rl++;
     }else{
-        while(
-            (var[len]>='A'&&var[len]<='Z')||
-            (var[len]>='a'&&var[len]<='z')||
-            (var[len]>='0'&&var[len]<='9')||
-            var[len]=='_'
-        ){
+        while(IS_LEGAL(var[len])){
+            printf("%c %u\n",var[len],len);
             len++;
         }
         rl+=len;
     }
+    if(!len){
+        rl+=handle_special_char(buf,buflen,var[0]);
+    }
     if(l){
         *l=rl;
     }
+    if(!len){
+        return 0;
+    }
     unsigned ret=-1;
-    unsigned cnt=0,start=0;
+    unsigned start=0;
     ret=find_var(var,len);
-    // printf("%s %u %u\n",var,len,ret);
+    printf("%u\n",len);
     if(ret!=(unsigned)-1){
         while(variable[ret][start]!='='){
             start++;
@@ -96,6 +102,13 @@ int get_var(char *buf,unsigned buflen,const char *var,unsigned *l,unsigned *c){
             *c=cnt;
         }
         return var_umask[ret];
+    }else{
+        if((ret=cmd_str_to_unsigned(var,len))!=(unsigned)-1&&ret<item_len){
+            cnt=MIN((unsigned long long)(item[ret+1]-item[ret]),buflen-len);
+            memcpy(buf,item[ret],cnt);
+        }else if(len==1){
+            handle_special_char(buf,buflen,var[0]);
+        }
     }
     if(c){
         *c=cnt;
@@ -225,4 +238,29 @@ static inline int var_strncmp(const char *str1,const char *str2,unsigned max_len
         return -1;
     }
     return 0;
+}
+
+static inline int handle_special_char(char *buf,unsigned buflen,char c){
+    unsigned cnt=0;
+    int r=0;
+    switch(c){
+    case '#':
+        cmd_unsigned_to_str(buf,buflen-1,item_len);
+        r=1;
+        break;
+    case '$':
+        int pid=getpid();
+        cmd_unsigned_to_str(buf,buflen-1,pid);
+        r=1;
+        break;
+    case '_':
+        if(!item_len){
+            break;
+        }
+        cnt=MIN((unsigned long long)(item[item_len]-item[item_len-1]),buflen);
+        memcpy(buf,item[item_len-1],cnt);
+        r=1;
+        break;
+    }
+    return r;
 }
