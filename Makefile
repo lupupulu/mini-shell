@@ -1,30 +1,40 @@
 CC = gcc
-CFLAG ?= -std=c99 -O2 -g -Wall
+CFLAG ?= -std=c99 -O2 -Wall
+
+BUILD_TYPE ?= DEBUG
+
+ifeq ($(BUILD_TYPE),RELEASE)
+RELEASE = -s
+DEBUG =
+else ifeq ($(BUILD_TYPE),DEBUG)
+RELEASE =
+DEBUG = -g --static
+else
+RELEASE =
+DEBUG =
+endif
 
 ALL: mnsh
 
-mnsh: main.c config.c history.o variable.o builtin_cmd.o input.o
-	$(CC) $(CFLAG) $^ -o $@
+mnsh: main.c config.c mnsh.o darray.o
+	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
-config.c: init
+config.c: init config.h
 	./init
 
-init: init.c builtin_cmd.o input.o variable.o history.o
-	$(CC) $(CFLAG) $^ -o $@
+init: init.c darray.o
+	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
-input.o: input.c config.h mnsh.h
-	$(CC) $(CFLAG) -c $< -o $@
+mnsh.o: mnsh.c
+	$(CC) -c $(DEBUG) $(CFLAG) $^ -o $@
 
-builtin_cmd.o: builtin_cmd.c config.h mnsh.h
-	$(CC) $(CFLAG) -c $< -o $@
+darray.o: darray.c
+	$(CC) -c $(DEBUG) $(CFLAG) $^ -o $@
 
-variable.o: variable.c config.h mnsh.h
-	$(CC) $(CFLAG) -c $< -o $@
-
-history.o: history.c config.h mnsh.h
-	$(CC) $(CFLAG) -c $< -o $@
+echokey: echokey.c
+	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 clean:
-	- rm -f mnsh builtin_cmd.o input.o variable.o history.o init config.c
+	- rm -f mnsh init config.c mnsh.o darray.o echokey
 
 .PHONY: clean
