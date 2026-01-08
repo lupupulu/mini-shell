@@ -1,61 +1,90 @@
 #include "mnsh.h"
+#include "config.h"
 #include <stdio.h>
+#include <string.h>
 
 hash_pair_t builtin_cmd[HASH_SIZE];
 unsigned int extra_builtin_real=1;
 hash_pair_t builtin_cmd_hash[HASH_SIZE];
 
-char *item[PARAM_BUF_ITEM];
-unsigned item_len;
+codeset_t codeset;
+da_str buffer;
 
-char buffer[BUF_SIZE];
-
-char start='$';
-
-
-int register_builtin(const char *name,command_func f);
-int init(void);
+key_setting_list_t key_config[CHAR_MAX];
+key_setting_list_t key_config_list[256];
+unsigned list_size=1;
 
 
-int init(void){
-    int r=0;
+int register_builtin(const char *name);
+void init(void);
 
-    r|=register_builtin("cd",NULL);
-    r|=register_builtin("pwd",NULL);
-    r|=register_builtin("history",NULL);
+MAKE_HASH_FUNCTION
 
-    r|=register_builtin("export",NULL);
-    r|=register_builtin("readonly",NULL);
-    r|=register_builtin("unset",NULL);
 
-    r|=register_builtin("read",NULL);
-    r|=register_builtin("echo",NULL);
+void init(void){
+    register_builtin("cd");
+    register_builtin("pwd");
+    register_builtin("history");
 
-    r|=register_builtin("jobs",NULL);
-    r|=register_builtin("fg",NULL);
-    r|=register_builtin("bg",NULL);
-    r|=register_builtin("wait",NULL);
+    register_builtin("export");
+    register_builtin("readonly");
+    register_builtin("unset");
 
-    r|=register_builtin("test",NULL);
-    r|=register_builtin("true",NULL);
-    r|=register_builtin("false",NULL);
+    register_builtin("read");
+    register_builtin("echo");
 
-    r|=register_builtin("command",NULL);
-    r|=register_builtin("exec",NULL);
-    r|=register_builtin("eval",NULL);
-    r|=register_builtin("times",NULL);
+    register_builtin("jobs");
+    register_builtin("fg");
+    register_builtin("bg");
+    register_builtin("wait");
 
-    r|=register_builtin("trap",NULL);
-    r|=register_builtin("set",NULL);
-    r|=register_builtin("shift",NULL);
-    r|=register_builtin("getopts",NULL);
+    register_builtin("test");
+    register_builtin("true");
+    register_builtin("false");
 
-    r|=register_builtin("umask",NULL);
-    r|=register_builtin("alias",NULL);
-    r|=register_builtin("unalias",NULL);
-    r|=register_builtin("type",NULL);
+    register_builtin("command");
+    register_builtin("exec");
+    register_builtin("eval");
+    register_builtin("times");
 
-    return r;
+    register_builtin("trap");
+    register_builtin("set");
+    register_builtin("shift");
+    register_builtin("getopts");
+
+    register_builtin("umask");
+    register_builtin("alias");
+    register_builtin("unalias");
+    register_builtin("type");
+
+    for(unsigned i=0;i<sizeof(key_setting)/sizeof(key_setting_t);i++){
+        key_setting_t *p=&key_setting[i];
+        size_t len=0;
+        if(p->esc){
+            len=strlen(p->esc);
+        }
+        key_setting_list_t new={.esc=p->esc,.len=len,.func=(void*)p->func,.next=0};
+        if(!key_config[(unsigned)p->key].func){
+            key_config[(unsigned)p->key]=new;
+            continue;
+        }
+        key_setting_list_t *now=&key_config[(unsigned)p->key];
+
+        while(len>now->len){
+            if(!now->next){
+                key_config_list[list_size]=new;
+                now->next=list_size;
+                goto L;
+            }
+            now=&key_config_list[now->next];
+        }
+        key_config_list[list_size]=*now;
+        new.next=list_size;
+        *now=new;
+        L:list_size++;
+    }
+
+    return ;
 }
 
 int main(int argc,const char *argv[]){
@@ -92,11 +121,44 @@ int main(int argc,const char *argv[]){
     }
     fprintf(fp,"};\n\n");
 
+    fprintf(fp,"key_setting_list_t key_config[%d]={\n",CHAR_MAX);
+    for(unsigned i=0;i<CHAR_MAX;i++){
+        if(!key_config[i].func){
+            fprintf(fp,"\t{}");
+        }else if(key_config[i].esc){
+            fprintf(fp,"\t{.next=%u,.len=%u,.esc=\"%s\",.func=%s}",key_config[i].next,key_config[i].len,key_config[i].esc,(char*)key_config[i].func);
+        }else{
+            fprintf(fp,"\t{.next=%u,.len=0,.esc=NULL,.func=%s}",key_config[i].next,(char*)key_config[i].func);
+        }
+        if(i<CHAR_MAX-1){
+            fprintf(fp,",\n");
+        }else{
+            fprintf(fp,"\n");
+        }
+    }
+    fprintf(fp,"};\n\n");
+
+    fprintf(fp,"key_setting_list_t key_config_list[]={\n");
+    fprintf(fp,"\t{},\n");
+    for(unsigned i=1;i<list_size;i++){
+        if(key_config_list[i].esc){
+            fprintf(fp,"\t{.next=%u,.len=%u,.esc=\"%s\",.func=%s}",key_config_list[i].next,key_config_list[i].len,key_config_list[i].esc,(char*)key_config_list[i].func);
+        }else{
+            fprintf(fp,"\t{.next=%u,.len=0,.esc=NULL,.func=%s}",key_config_list[i].next,(char*)key_config_list[i].func);
+        }
+        if(i<list_size-1){
+            fprintf(fp,",\n");
+        }else{
+            fprintf(fp,"\n");
+        }
+    }
+    fprintf(fp,"};\n\n");
+
     fclose(fp);
     return 0;
 }
 
-int register_builtin(const char *name,command_func f){
+int register_builtin(const char *name){
     unsigned hash=hash_function(name);
     if(builtin_cmd_hash[hash].key){
         printf("repeat: %d %s %s\n",hash,builtin_cmd_hash[hash].key,name);
@@ -106,13 +168,13 @@ int register_builtin(const char *name,command_func f){
         }
         builtin_cmd_hash[now].next=extra_builtin_real;
         builtin_cmd[extra_builtin_real].key=name;
-        builtin_cmd[extra_builtin_real].f=f;
+        builtin_cmd[extra_builtin_real].f=NULL;
         builtin_cmd[extra_builtin_real].next=0;
         extra_builtin_real++;
         return 1;
     }
     builtin_cmd_hash[hash].key=name;
-    builtin_cmd_hash[hash].f=f;
+    builtin_cmd_hash[hash].f=NULL;
     builtin_cmd_hash[hash].next=0;
     return 0;
 }

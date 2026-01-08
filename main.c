@@ -4,62 +4,67 @@
 #include <sys/wait.h>
 #include "mnsh.h"
 #include <stdio.h>
+#include <stdlib.h>
 
-static char *last_item[PARAM_BUF_ITEM];
-static unsigned last_item_len;
+darray_t(char*) items;
 
-char buffer[BUF_SIZE];
-char start='$';
-
-int set_terminal_echo(int enable);
 int execute_extern_command(char * const *argv);
+
+void clear(void);
+
 unsigned handle_backslash(char *r,const char *c);
+int parse_buffer(void);
 
-int parse_buf_to_param(char *buf,unsigned len);
-
-
-
-int main(int argc,const char **argv,char **env){
+int main(int argc,const char **argv,char **envi){
 
     if(set_terminal_echo(0)){
         return 1;
     }
 
+    char *tmp=NULL;
+    da_add(sizeof(char*),&env,&tmp);
     unsigned i=0;
-    while(env[i]){
-        set_var(env[i],VAR_EXPORT);
+    while(envi[i]){
+        set_var(envi[i],VAR_EXPORT);
         i++;
     }
 
-    unsigned rlen=0;
+    set_var("PS1=$ ",0);
+    set_var("PS2=> ",0);
+
     int con=0;
 
+    const char *psn="PS1";
+
     while(1){
-        write(STDOUT_FILENO,&start,1);
-        write(STDOUT_FILENO," ",1);
-        buffer[0]='\0';
-        int r=input(buffer,BUF_SIZE,&rlen,IN_ECHO|IN_HANDLE_CHAR);
+        const char *ps=get_var(psn,0);
+        write(STDOUT_FILENO,ps,strlen(ps));
+        da_init(&buffer);
+        int r=input(IN_ECHO|IN_HANDLE_CHAR);
         switch(r){
         case 127:
+            clear();
             return 127;
         case -1:
-            return set_terminal_echo(1);
+            clear();
+            set_terminal_echo(1);
+            return 0;
         case 0:
-            start='$';
             if(!con){
-                item_len=0;
             }
-            r=parse_buf_to_param(buffer,rlen);
+            r=parse_buffer();
             con=0;
             if(r==1){
-                start='>';
+                ps="PS2";
                 con=1;
+            }else{
+                ps="PS1";
             }
             break;
         }
     }
 
-    
+    clear();
 
     return 0;
 }
@@ -78,9 +83,7 @@ int set_terminal_echo(int enable){
 
     new_termios=original_termios;
 
-    if(enable){
-        new_termios.c_lflag|=(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
-    }else{
+    if(!enable){
         new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
         new_termios.c_cc[VMIN]=1;
         new_termios.c_cc[VTIME]=0;
@@ -94,211 +97,124 @@ int set_terminal_echo(int enable){
 }
 
 
-int parse_buf_to_param(char *buf,unsigned len){
-    static char param[PARAM_BUF_SIZE];
+int parse_buffer(void){
+    size_t i=0;
+    da_str str;
+    da_init(&str);
+    da_str tmp;
 
-    static char *item[PARAM_BUF_ITEM];
-    static unsigned item_len;
+    char quote=0;
 
-    static char temp[BUF_SIZE];
-    static unsigned int temp_len;
-
-    if(len&&buf[len-1]=='\\'&&temp_len+len<BUF_SIZE){
-        if(temp_len){
-            history_remove();
-        }
-        memcpy(temp+temp_len,buf,len);
-        temp_len+=len;
-        temp[temp_len]='\0';
-        history_add(temp,temp_len);
-        temp[--temp_len]='\0';
-        return 1;
+    while(i==' '){
+        i++;
     }
-
-    if(temp_len){
-        history_remove();
-        memcpy(temp+temp_len,buf,len);
-        temp_len+=len;
-        temp[temp_len]='\0';
-        memcpy(buf,temp,temp_len+1);
-        len=temp_len;
-    }
-
-    unsigned int param_len=(unsigned long long)(item[item_len]-item[0]);
-
-    int skip_flg=1;
-    char sign=0;
-    int note=0;
-
-    int var=0,sp_var=0,var_brackets=0;
-    unsigned var_start=0;
-    unsigned var_len,var_cnt;
-
-    int ret=0;
-
-    for(unsigned int i=0;i<len&&item_len<PARAM_BUF_ITEM-1&&param_len<PARAM_BUF_SIZE;i++){
-        if(
-            (var&&!var_brackets&&!(IS_LEGAL(buf[i])||sp_var)&&buf[i]!='{')||
-            var_brackets==2
-        ){
-            var_len=0,var_cnt=0;
-            param[param_len]='\0';
-            get_var(param+var_start,PARAM_BUF_SIZE-var_start-1,param+var_start+1,&var_len,&var_cnt);
-            param_len=var_start+var_cnt;
-            var=0;
-            var_brackets=0;
-            sp_var=0;
-        }
-        if(buf[i]==' '&&!sign){
-            if(!skip_flg){
-                skip_flg=1;
-                param[param_len++]='\0';
+    while(i<buffer.size){
+        if(buffer.arr[i]=='\\'){
+            if(i==buffer.size-1){
+                da_add(sizeof(char),&str,"");
+                da_add(sizeof(char*),&items,&str.arr);
+                return 1;
             }
+            da_add(sizeof(char),&str,&buffer.arr[i+1]);
+            i+=2;
             continue;
-        }else if(!var_brackets&&buf[i]=='#'){
-            if(!sign){
-                break;
+        }else if(!quote&&buffer.arr[i]==' '){
+            da_add(sizeof(char),&str,"");
+            da_add(sizeof(char*),&items,&str.arr);
+            da_init(&str);
+            while(buffer.arr[i]==' '){
+                i++;
             }
-            note=1;
-        }else if(buf[i]=='\"'||buf[i]=='\''){
-            if(!sign){
-                sign=buf[i];
-                continue;
-            }
-            if(sign&&sign==buf[i]){
-                sign=0;
-                note=0;
-                continue;
-            }
-        }else if(sign!='\''&&buf[i]=='$'){
-            var=1;
-            var_start=param_len;
-        }else if(var&&buf[i]=='{'){
-            var_brackets=1;
-        }else if(var_brackets==1&&buf[i]=='}'){
-            var_brackets=2;
-        }
-        if(
-            IS_SPECIAL_VARIABLE(buf[i])&&
-            ((var&&!var_brackets&&var_start==i-1)||
-            (var_brackets==1&&var_start==i-2))
-        ){
-            sp_var=1;
-        }
-        if(skip_flg){
-            skip_flg=0;
-            item[item_len]=&param[param_len];
-            item_len++;
-        }
-        if(sign!='\''&&buf[i]=='~'&&(!i||buf[i-1]==' ')&&(buf[i+1]=='/'||buf[i+1]==' '||buf[i+1]=='\0')){
-            var_len=0,var_cnt=0;
-            get_var(param+param_len,PARAM_BUF_SIZE-param_len-1,"HOME",&var_len,&var_cnt);
-            param_len+=var_cnt;
-            continue;
-        }
-        if(buf[i]=='\\'&&i+1<len){
-            ret=handle_backslash(&param[param_len++],&buf[i+1]);
-            i+=ret;
-            continue;
-        }
-        if(note){
-            continue;
-        }
-        param[param_len++]=buf[i];
-    }
-    if(var){
-        var_len=0,var_cnt=0;
-        param[param_len]='\0';
-        get_var(param+var_start,PARAM_BUF_SIZE-var_start,param+var_start+1,&var_len,&var_cnt);
-        param_len=var_start+var_cnt;
-        var=0;
-    }
-
-    param[param_len]='\0';
-
-    // for(int i=0;i<*item_len;i++){
-    //     printf("%d %s\n",i,item[i]);
-    // }
-    if(!item_len){
-        return 0;
-    }
-
-    // printf("%s %d\n",buf,len);
-    history_add(buf,len);
-
-    item[item_len]=NULL;
-    command_func f=is_builtin_cmd(item);
-    if(f){
-        f(item);
-        item_len=0;
-        item[0]=0;
-        return 0;
-    }
-
-    execute_extern_command(item);
-
-    item_len=0;
-    item[0]=0;
-
-    temp_len=0;
-
-    return 0;
-}
-
-unsigned handle_backslash(char *r,const char *c){
-    if(c[0]>='0'&&c[0]<='9'){
-        *r=0;
-        register unsigned i=0;
-        while(i<3){
-            if(c[i]<'0'||c[i]>'9'){
-                break;
-            }
-            *r*=10;
-            *r+=c[i]-'0';
-            i++;
-        }
-        return i;
-    }else if(c[0]=='x'){
-        *r=0;
-        register unsigned i=0;
-        while(i<2){
-            if(c[i]>='0'&&c[i]<='9'){
-                *r*=16;
-                *r+=c[i]-'0';
-            }else if(c[i]>='A'&&c[i]<='F'){
-                *r*=16;
-                *r+=c[i]-'A';
-            }else if(c[i]>='a'&&c[i]<='f'){
-                *r*=16;
-                *r+=c[i]-'a';
+        }else if(!quote&&buffer.arr[i]=='$'){
+            da_init(&tmp);
+            if(buffer.arr[i+1]=='{'){
+                i+=2;
+                while(buffer.arr[i]=='}'){
+                    da_add(sizeof(char),&tmp,&buffer.arr[i]);
+                    i++;
+                }
+                da_add(sizeof(char),&tmp,"");
             }else{
-                break;
+                i++;
+                while(IS_LEGAL(buffer.arr[i])){
+                    da_add(sizeof(char),&tmp,&buffer.arr[i]);
+                    i++;
+                }
+                da_add(sizeof(char),&tmp,"");
+            }
+            const char *r=get_var(tmp.arr,0);
+            da_clear(&tmp);
+            if(!r){
+                continue;
+            }
+            size_t j=0;
+            while(r[j]!='\0'){
+                da_add(sizeof(char),&str,&r[j]);
+                j++;
+            }
+        }else if(buffer.arr[i]=='\''){
+            if(quote=='\''){
+                quote=0;
+            }else if(!quote){
+                quote='\'';
             }
             i++;
+        }else if(buffer.arr[i]=='\"'){
+            if(quote=='\"'){
+                quote=0;
+            }else if(!quote){
+                quote='\"';
+            }
+            i++;
+        }else{
+            da_add(sizeof(char),&str,&buffer.arr[i]);
+            i++;
         }
-        return i;
     }
-    switch(c[0]){
-    case 't':
-        *r='\t';
-        return 1;
-    case 'n':
-        *r='\n';
-        return 1;
-    case 'r':
-        *r='\r';
-        return 1;
-    default:
-        *r=c[0];
+
+    if(str.arr){
+        da_add(sizeof(char),&str,"");
+        da_add(sizeof(char*),&items,&str.arr);
+    }
+    
+    if(!items.size){
+        return 0;
+    }
+
+    char *null=NULL;
+    da_add(sizeof(char*),&items,&null);
+
+    char *p=malloc(sizeof(char)*(buffer.size+1));
+    memcpy(p,buffer.arr,buffer.size);
+    p[buffer.size]='\0';
+    da_add(sizeof(char*),&history,&p);
+
+    if(quote){
         return 1;
     }
+
+    command_func f=is_builtin_cmd(items.arr);
+    if(f){
+        f(items.arr);
+    }else{
+        set_terminal_echo(1);
+        execute_extern_command(items.arr);
+        set_terminal_echo(0);
+    }
+
+    for(size_t i=0;i<items.size;i++){
+        free(items.arr[i]);
+    }
+    da_fake_clear(&items);
+
+
     return 0;
 }
 
 int execute_extern_command(char * const *argv){
     int pid=fork();
     if(!pid){
-        cmd_execvpe(argv[0],argv,(char*const*)env_vec);
+        cmd_execvpe(argv[0],argv,env.arr);
         write(STDERR_FILENO,argv[0],strlen(argv[0]));
         write(STDERR_FILENO,": command not found\n",20);
         _exit(127);
@@ -309,5 +225,22 @@ int execute_extern_command(char * const *argv){
     }
     write(STDERR_FILENO,"failed to fork\n",15);
     return 1;
+}
+
+
+void clear(void){
+    for(size_t i=0;i<history.size;i++){
+        free(history.arr[i]);
+    }
+    da_clear(&history);
+    for(size_t i=0;i<variable.size;i++){
+        free(variable.arr[i].var);
+    }
+    da_clear(&variable);
+    da_clear(&env);
+    for(size_t i=0;i<items.size;i++){
+        free(items.arr[i]);
+    }
+    da_clear(&items);
 }
 
