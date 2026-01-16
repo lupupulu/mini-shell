@@ -16,12 +16,14 @@ size_t history_pos;
 da_variable variable;
 da_env env;
 
-char pathbuf[PATHBUFSIZ];
+char pathbuf[PATH_BUF_SIZE];
+char echobuf[ECHO_BUF_SIZE];
+size_t echobufsiz;
 
 #define output(s,l) if(echo)write(STDOUT_FILENO,s,l)
-void insert_str(const char *c,unsigned len);
-void insert(char c);
-void clean_show(void);
+void insert(const char *c,unsigned len);
+void clean_show(size_t tpos);
+void to_pos(size_t tpos);
 
 int deal_keys(unsigned char c);
 
@@ -29,6 +31,7 @@ int deal_keys(unsigned char c);
 int input(unsigned umask){
     int ret=0;
     char c;
+    char buf[8];
     pos=0;
 
     history_pos=history.size;
@@ -38,12 +41,19 @@ int input(unsigned umask){
     while(1){
         ret=read(STDIN_FILENO,&c,1);
         if(c==0x04||ret==0){
-            write(STDOUT_FILENO,"\nexit\n",6);
-            return -1;
+            if(!is_script){
+                echo_to_buf("\nexit\n",6);
+                echo_buf_to_stdout();
+                return -1;
+            }
+            return 2;
         }
 
         if(c=='\n'){
-            write(STDOUT_FILENO,"\n",1);
+            if(!is_script){
+                echo_to_buf("\n",1);
+                echo_buf_to_stdout();
+            }
             if(!now_is_bufffer){
                 free(history.arr[history.size-1]);
                 da_pop(sizeof(char*),&history);
@@ -51,7 +61,13 @@ int input(unsigned umask){
             now_is_bufffer=1;
             return 0;
         }else if(deal_keys(c)==-1){
-            insert(c);
+            buf[0]=c;
+            ret=get_char_len(c);
+            for(int i=1;i<ret;i++){
+                read(STDIN_FILENO,&c,1);
+                buf[i]=c;
+            }
+            insert(buf,ret);
         }
     }
     return 0;
@@ -81,7 +97,7 @@ int deal_keys(unsigned char c){
         while(cnt<now->len){
             ret=read(STDIN_FILENO,&c,1);
             if(!ret){
-                insert_str(esc,siz);
+                insert(esc,siz);
                 return 127;
             }
             buf[cnt++]=c;
@@ -95,95 +111,176 @@ int deal_keys(unsigned char c){
         }
         now=&key_config_list[now->next];
     }
-    insert_str(esc,siz);
+    insert(esc,siz);
     return 127;
 }
 
 
-void insert_str(const char *c,unsigned len){
-    if(pos==buffer.size){
-        if(buffer.size+len>=buffer.real){
-            da_resize(sizeof(char),&buffer,buffer.size+len+1);
+size_t next_char(const char *str,size_t pos){
+    switch(codeset){
+    case C:
+        break;
+    case UTF8:
+        if(UTF8_CHECK(str[pos],2)){
+            return pos+2;
+        }else if(UTF8_CHECK(str[pos],3)){
+            return pos+3;
+        }else if(UTF8_CHECK(str[pos],4)){
+            return pos+4;
         }
-        memcpy(buffer.arr+buffer.size,c,len);
-        buffer.size+=len;
-        pos+=len;
-        output(c,len);
+        break;
+    }
+    return pos+1;
+}
+
+size_t last_char(const char *str,size_t pos){
+    switch(codeset){
+    case C:
+        break;
+    case UTF8:
+        pos--;
+        while(UTF8_CHECK(str[pos],1)){
+            pos--;
+        }
+        return pos;
+    }
+    return pos-1;
+}
+
+size_t get_char_width(const char *c){
+    switch(codeset){
+    case C:
+        return 1;
+    case UTF8:
+        return utf8_get_char_width(c);
+    }
+    return 1;
+}
+
+size_t get_char_len(char c){
+    switch(codeset){
+    case C:
+        break;
+    case UTF8:
+        if(UTF8_CHECK(c,2)){
+            return 2;
+        }else if(UTF8_CHECK(c,3)){
+            return 3;
+        }else if(UTF8_CHECK(c,4)){
+            return 4;
+        }
+        break;
+    }
+    return 1;
+}
+
+
+void insert(const char *c,unsigned len){
+    if(buffer.size+len>=buffer.real){
+        da_resize(sizeof(char),&buffer,buffer.size+len+1);
+    }
+    memmove(buffer.arr+pos+len,buffer.arr+pos,buffer.size-pos);
+    memcpy(buffer.arr+pos,c,len);
+    buffer.size+=len;
+    size_t i=0;
+    output(buffer.arr+pos,buffer.size-pos);
+    size_t dpos=pos;
+    while(i<len){
+        dpos=next_char(buffer.arr,dpos);
+        i+=get_char_len(c[i]);
+    }
+    pos=buffer.size;
+    to_pos(dpos);
+}
+
+void clean_show(size_t tpos){
+    size_t dpos=pos;
+    size_t cnt=0,width=0;
+    while(dpos<buffer.size){
+        width=get_char_width(&buffer.arr[dpos]);
+        echo_to_buf("  ",width);
+        dpos=next_char(buffer.arr,dpos);
+        cnt+=width;
+    }
+    while(cnt){
+        echo_to_buf("\b",1);
+        cnt--;
+    }
+    if(tpos<pos){
+        // dpos=last_char(buffer.arr,pos);
+        dpos=pos;
+        while(dpos>tpos){
+            width=get_char_width(&buffer.arr[dpos]);
+            echo_to_buf("\b\b",width);
+            echo_to_buf("  ",width);
+            echo_to_buf("\b\b",width);
+            dpos=last_char(buffer.arr,dpos);
+        }
+        pos=tpos;
+    }
+    echo_buf_to_stdout();
+
+}
+
+void to_pos(size_t tpos){
+    size_t dpos=pos;
+    if(tpos>pos){
+        while(dpos<tpos){
+            dpos=next_char(buffer.arr,dpos);
+            echo_to_buf("\033[C\033[C",3*get_char_width(&buffer.arr[dpos]));
+        }
+    }else if(tpos<pos){
+        while(dpos>tpos){
+            dpos=last_char(buffer.arr,dpos);
+            echo_to_buf("\033[D\033[D",3*get_char_width(&buffer.arr[dpos]));
+        }
+    }
+    pos=dpos;
+    echo_buf_to_stdout();
+}
+
+void echo_to_buf(const char *str,size_t size){
+    if(!echo){
+        return ;
+    }
+
+    if(size>ECHO_BUF_SIZE){
+        echo_buf_to_stdout();
+        write(STDOUT_FILENO,str,size);
+    }else if(echobufsiz+size>=ECHO_BUF_SIZE){
+        echo_buf_to_stdout();
+        memcpy(echobuf,str,size);
+        echobufsiz+=size;
     }else{
-        if(buffer.size+len>=buffer.real){
-            da_resize(sizeof(char),&buffer,buffer.size+len+1);
-        }
-        memmove(buffer.arr+pos+len,buffer.arr+pos,buffer.size-pos);
-        memcpy(buffer.arr+pos,c,len);
-        buffer.size+=len;
-        pos+=len;
-        if(!echo){
-            return ;
-        }
-        write(STDOUT_FILENO,buffer.arr+pos-len,buffer.size-pos+len);
-        for(int i=0;i<buffer.size-pos;i++){
-            write(STDOUT_FILENO,"\b",1);
-        }
+        memcpy(echobuf+echobufsiz,str,size);
+        echobufsiz+=size;
     }
 }
 
-
-
-void insert(char c){
-    if(pos==buffer.size){
-        da_add(sizeof(char),&buffer,&c);
-        output(&c,1);
-    }else{
-        da_add(sizeof(char),&buffer,&c);
-        memmove(buffer.arr+pos+1,buffer.arr+pos,buffer.size-pos);
-        buffer.arr[pos]=c;
-        if(!echo){
-            return ;
-        }
-        write(STDOUT_FILENO,buffer.arr+pos,buffer.size-pos);
-        for(int i=0;i<buffer.size-pos-1;i++){
-            write(STDOUT_FILENO,"\b",1);
-        }
+void echo_buf_to_stdout(void){
+    if(!echo){
+        return ;
     }
-    pos++;
+
+    write(STDOUT_FILENO,echobuf,echobufsiz);
+    echobufsiz=0;
 }
-
-void clean_show(void){
-    for(size_t i=0;i<pos;i++){
-        write(STDOUT_FILENO,"\b",1);
-    }
-    for(size_t i=0;i<buffer.size;i++){
-        write(STDOUT_FILENO," ",1);
-    }
-    for(size_t i=0;i<buffer.size;i++){
-        write(STDOUT_FILENO,"\b",1);
-    }
-}
-
 
 
 int backspace(void){
     if(!pos){
         return 0;
     }
-    if(pos==buffer.size){
+    size_t dpos=last_char(buffer.arr,pos),opos=pos;
+    to_pos(dpos);
+    clean_show(pos);
+    memmove(buffer.arr+dpos,buffer.arr+opos,buffer.size-opos);
+    for(int i=0;i<opos-dpos;i++){
         da_pop(sizeof(char),&buffer);
-        pos--;
-        output("\b \b",3);
-        return 0;
     }
-    memmove(buffer.arr+pos-1,buffer.arr+pos,buffer.size-pos);
-    pos--;
-    da_pop(sizeof(char),&buffer);
-    if(!echo){
-        return 0;
-    }
-    write(STDOUT_FILENO,"\b",1);
-    write(STDOUT_FILENO,buffer.arr+pos-1,buffer.size-pos);
-    write(STDOUT_FILENO," ",1);
-    for(int i=0;i<buffer.size-pos+1;i++){
-        write(STDOUT_FILENO,"\b",1);
-    }
+    output(buffer.arr+pos,buffer.size-pos);
+    pos=buffer.size;
+    to_pos(dpos);
     return 0;
 }
 
@@ -191,54 +288,58 @@ int delete(void){
     if(pos>=buffer.size){
         return 0;
     }
+
+    size_t dpos=next_char(buffer.arr,pos);
     if(pos==buffer.size-1){
+        clean_show(pos);
+        for(int i=0;i<dpos-pos;i++){
+            da_pop(sizeof(char),&buffer);
+        }
+        return 0;
+    }
+
+    clean_show(pos);
+    memmove(buffer.arr+pos,buffer.arr+dpos,buffer.size-dpos);
+    for(int i=0;i<dpos-pos;i++){
         da_pop(sizeof(char),&buffer);
-        output(" \b",2);
-        return 0;
     }
-    memmove(buffer.arr+pos,buffer.arr+pos+1,buffer.size-pos);
-    da_pop(sizeof(char),&buffer);
-    
-    if(!echo){
-        return 0;
-    }
-    write(STDOUT_FILENO,buffer.arr+pos,buffer.size-pos);
-    write(STDOUT_FILENO," ",1);
-    for(int i=0;i<buffer.size-pos+1;i++){
-        write(STDOUT_FILENO,"\b",1);
-    }
+
+    output(buffer.arr+pos,buffer.size-pos);
+
+    dpos=pos;
+    pos=buffer.size;
+    to_pos(dpos);
+
     return 0;
 }
 
 int left(void){
-    if(pos){
-        output("\033[D",3);
-        pos--;
+    if(!pos){
+        return 0;
     }
+    size_t dpos=last_char(buffer.arr,pos);
+    output("\033[D\033[D",3*get_char_width(&buffer.arr[dpos]));
+    pos=dpos;
     return 0;
 }
 
 int right(void){
-    if(pos<buffer.size){
-        output("\033[C",3);
-        pos++;
+    if(pos>=buffer.size){
+        return 0;
     }
+    size_t dpos=next_char(buffer.arr,pos);
+    output("\033[C\033[C",3*get_char_width(&buffer.arr[pos]));
+    pos=dpos;
     return 0;
 }
 
 int to_start(void){
-    while(pos){
-        output("\033[D",3);
-        pos--;
-    }
+    to_pos(0);
     return 0;
 }
 
 int to_end(void){
-    while(pos<buffer.size){
-        output("\033[C",3);
-        pos++;
-    }
+    to_pos(buffer.size);
     return 0;
 }
 
@@ -246,17 +347,20 @@ int last_word(void){
     if(!pos){
         return 0;
     }
-    int legal=IS_LEGAL(buffer.arr[pos-1]);
+    size_t dpos=last_char(buffer.arr,pos);
+    int legal=IS_LEGAL(buffer.arr[dpos]);
     if(!legal){
-        while(pos&&!IS_LEGAL(buffer.arr[pos-1])){
-            output("\033[D",3);
-            pos--;
+        while(dpos&&!IS_LEGAL(buffer.arr[dpos])){
+            dpos=last_char(buffer.arr,dpos);
         }
     }
-    while(pos&&IS_LEGAL(buffer.arr[pos-1])){
-        output("\033[D",3);
-        pos--;
+    while(dpos&&IS_LEGAL(buffer.arr[dpos])){
+        dpos=last_char(buffer.arr,dpos);
     }
+    if(!IS_LEGAL(buffer.arr[dpos])){
+        dpos=next_char(buffer.arr,dpos);
+    }
+    to_pos(dpos);
     return 0;
 }
 
@@ -265,16 +369,16 @@ int next_word(void){
         return 0;
     }
     int legal=IS_LEGAL(buffer.arr[pos]);
+    size_t dpos=pos;
     if(!legal){
-        while(pos<buffer.size&&!IS_LEGAL(buffer.arr[pos])){
-            pos++;
-            output("\033[C",3);
+        while(dpos<buffer.size&&!IS_LEGAL(buffer.arr[dpos])){
+            dpos=next_char(buffer.arr,dpos);
         }
     }
-    while(pos<buffer.size&&IS_LEGAL(buffer.arr[pos])){
-        pos++;
-        output("\033[C",3);
+    while(dpos<buffer.size&&IS_LEGAL(buffer.arr[dpos])){
+        dpos=next_char(buffer.arr,dpos);
     }
+    to_pos(dpos);
     return 0;
 }
 
@@ -297,7 +401,7 @@ int last_history(void){
         return 0;
     }
 
-    clean_show();
+    clean_show(0);
 
     if(now_is_bufffer){
         char *p=malloc(sizeof(char)*(buffer.size+1));
@@ -323,7 +427,7 @@ int next_history(void){
         return 0;
     }
 
-    clean_show();
+    clean_show(0);
 
     history_pos++;
     da_clear(&buffer);
@@ -358,7 +462,21 @@ variable_t *find_var(const char *var){
     }
     return NULL;
 }
-const char *get_var(const char *var,size_t i){
+const char *get_var(const char *var){
+    if(var[1]=='\0'){
+        if(var[0]>='0'&&var[0]<='9'){
+            if(var[0]-'0'>g_argc){
+                return NULL;
+            }else{
+                return g_argv[var[0]-'0'];
+            }
+        }else if(var[0]=='#'){
+            return g_argc_s;
+        }else if(var[0]=='?'){
+            cmd_unsigned_to_str(g_ret_s,MAX_LL_SIZE-1,g_ret);
+            return g_ret_s;
+        }
+    }
     variable_t *v=find_var(var);
     if(!v){
         return NULL;
@@ -510,50 +628,96 @@ unsigned cmd_str_to_unsigned(const char *str,unsigned long size){
     return r;
 }
 
-int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
-    if(file[0]=='.'&&!access(file,F_OK)){
-        return execve(file,argv,envp);
+const char *file_is_exist(const char *file,int type,int is_cmd){
+    if(!file){
+        return NULL;
     }
-    const char *path=get_var("PATH",0);
-    unsigned len=strlen(path),flen=strlen(file);
-    unsigned buflen=0;
+    size_t buflen=0;
+    size_t flen=strlen(file);
+    int is_file=1;
+    size_t i=0;
+    if(is_cmd){
+        is_file=0;
+        while(file[i]){
+            if(file[i]=='/'){
+                is_file=1;
+                break;
+            }
+            i++;
+        }
+    }
+    if(is_file&&!access(file,type)){
+        return file;
+    }
+    const char *path=get_var("PATH");
+    size_t len=strlen(path);
     for(unsigned i=0;i<=len;i++){
         if(path[i]!=':'&&path[i]!='\0'){
             pathbuf[buflen++]=path[i];
             continue;
         }
         pathbuf[buflen++]='/';
-        for(size_t j=0;buflen<PATHBUFSIZ&&j<=flen;j++){
+        for(size_t j=0;buflen<PATH_BUF_SIZE&&j<=flen;j++){
             pathbuf[buflen++]=file[j];
         }
-        if(!access(pathbuf,F_OK)){
-            return execve(pathbuf,argv,envp);
+        if(!access(pathbuf,type)){
+            return pathbuf;
         }
         buflen=0;
         pathbuf[0]='\0';
+    }
+    return NULL;
+}
+
+int is_variable(const char *cmd){
+    if(cmd[0]>='0'&&cmd[0]<='9'){
+        return 0;
+    }
+    size_t i=0;
+    while(cmd[i]!='\0'){
+        if(cmd[i]=='='){
+            return 1;
+        }else if(!IS_LEGAL(cmd[i])){
+            return 0;
+        }
+        i++;
+    }
+    return 0;
+}
+
+int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
+    const char *p=file_is_exist(file,F_OK|X_OK,1);
+    if(p){
+        return execve(p,argv,envp);
     }
     return -1;
 }
 
 int sh_cd(char *const *argv){
     int r=1;
+    const char *p;
     if(!argv[1]){
-        r=chdir(get_var("HOME",0));
+        p=get_var("HOME");
     }else{
-        r=chdir(argv[1]);
+        p=argv[1];
     }
+    r=chdir(p);
     if(r){
-        write(STDOUT_FILENO,"cd: ",4);
-        write(STDOUT_FILENO,argv[1],strlen(argv[1]));
-        write(STDOUT_FILENO,": no such file or directory\n",28);
+        write(STDERR_FILENO,"cd: ",4);
+        write(STDERR_FILENO,argv[1],strlen(argv[1]));
+        write(STDERR_FILENO,": no such file or directory\n",28);
         return 1;
     }
+    pathbuf[0]='\0';
+    strcpy(pathbuf,"PWD=");
+    strcat(pathbuf,p);
+    set_var(pathbuf,VAR_EXPORT);
     return 0;
 }
 int sh_pwd(char *const *argv){
-    char *r=getcwd(pathbuf,PATHBUFSIZ);
+    char *r=getcwd(pathbuf,PATH_BUF_SIZE);
     if(r!=pathbuf){
-        write(STDOUT_FILENO,"pwd: failed\n",12);
+        write(STDERR_FILENO,"pwd: failed\n",12);
         return 1;
     }
     write(STDOUT_FILENO,pathbuf,strlen(pathbuf));
@@ -583,11 +747,17 @@ int sh_export(char *const *argv){
     if(!argv[1]){
         unsigned i=0;
         while(env.arr[i]){
+            write(STDOUT_FILENO,"export ",7);
             write(STDOUT_FILENO,env.arr[i],strlen(env.arr[i]));
             write(STDOUT_FILENO,"\n",1);
             i++;
         }
         return 0;
+    }
+
+    int ret=is_variable(argv[1]);
+    if(!ret){
+        return 127;
     }
     return set_var(argv[1],VAR_EXPORT)?127:0;
 }
@@ -595,6 +765,7 @@ int sh_readonly(char *const *argv){
     if(!argv[1]){
         for(unsigned i=0;i<variable.size;i++){
             if(variable.arr[i].umask&VAR_READONLY&&variable.arr[i].umask&VAR_EXIST){
+                write(STDOUT_FILENO,"readonly ",9);
                 write(STDOUT_FILENO,variable.arr[i].var,strlen(variable.arr[i].var));
                 write(STDOUT_FILENO,"\n",1);
             }
@@ -644,16 +815,22 @@ int sh_read(char *const *argv){
         }
         i++;
     }
-    size_t vlen=strlen(var);
+
+    da_fake_clear(&buffer);
     int r=input(umask);
-    if(!r){
+    if(r){
         return 127;
     }
-    da_resize(sizeof(char),&buffer,sizeof(char)*(vlen+buffer.size+2));
-    memmove(buffer.arr+vlen+1,buffer.arr,buffer.size*sizeof(char));
-    memcpy(buffer.arr,var,vlen);
-    buffer.arr[vlen]='=';
-    buffer.arr[buffer.size-1]='\0';
+
+    char *tmp=malloc(sizeof(char)*(strlen(var)+1+buffer.size+1));
+    tmp[0]='\0';
+    strcpy(tmp,var);
+    strcat(tmp,"=");
+    da_add(sizeof(char),&buffer,"");
+    strcat(tmp,buffer.arr);
+    set_var(tmp,0);
+    free(tmp);
+    da_fake_clear(&buffer);
     return 0;
 }
 int sh_echo(char *const *argv){
@@ -664,10 +841,9 @@ int sh_echo(char *const *argv){
         i++;
         if(argv[i]){
             write(STDOUT_FILENO," ",1);
-        }else{
-            write(STDOUT_FILENO,"\n",1);
         }
     }
+    write(STDOUT_FILENO,"\n",1);
     return 0;
 }
 
@@ -741,9 +917,3 @@ int sh_type(char *const *argv){
 }
 
 
-size_t next_char(const char *str,size_t size,size_t pos){
-    return pos+1;
-}
-size_t last_char(const char *str,size_t size,size_t pos){
-    return pos-1;
-}

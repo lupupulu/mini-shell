@@ -16,7 +16,7 @@ endif
 
 ALL: mnsh
 
-mnsh: main.c config.c mnsh.o darray.o
+mnsh: main.c config.c mnsh.o darray.o locale.o
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 config.c: init config.h
@@ -31,10 +31,13 @@ mnsh.o: mnsh.c
 darray.o: darray.c
 	$(CC) -c $(DEBUG) $(CFLAG) $^ -o $@
 
+locale.o: locale.c
+	$(CC) -c $(DEBUG) $(CFLAG) $^ -o $@
+
 echokey: echokey.c
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 clean:
-	- rm -f mnsh init config.c mnsh.o darray.o echokey
+	- rm -f mnsh init config.c mnsh.o darray.o locale.o echokey
 
 .PHONY: clean
