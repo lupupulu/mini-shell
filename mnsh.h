@@ -48,6 +48,14 @@ extern int is_script;
 
 int set_terminal_echo(int enable);
 
+typedef struct {
+    char **argv;
+    char *cmds;
+    size_t argvn;
+    size_t cmdlen;
+}command_t;
+typedef darray_t(command_t) da_command;
+
 size_t next_char(const char *str,size_t pos);
 size_t last_char(const char *str,size_t pos);
 size_t get_char_width(const char *c);
@@ -196,6 +204,7 @@ int backspace(void);
 int delete(void);
 int clear_left(void);
 int clear_right(void);
+int clear_last_word(void);
 
 typedef struct {
     char key;
