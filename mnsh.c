@@ -27,7 +27,28 @@ void to_pos(size_t tpos);
 
 int deal_keys(unsigned char c);
 
-
+#ifdef BASIC_INPUT
+int input(unsigned umask){
+    int c=0;
+    while(1){
+        c=getc(stdin);
+        if(c=='\n'){
+            return 0;
+        }else if(c=='\0'||c==-1){
+            if(!is_script){
+                return -1;
+            }
+            return 2;
+        }
+        int tc=c;
+        while(tc){
+            da_add(sizeof(char),&buffer,&tc);
+            tc>>=8;
+        }
+    }
+    return -1;
+}
+#else
 int input(unsigned umask){
     int ret=0;
     char c;
@@ -72,6 +93,7 @@ int input(unsigned umask){
     }
     return 0;
 }
+#endif
 
 #define STD_RET(v) \
     ((unsigned)(v)>127?(127):(v))
@@ -396,6 +418,36 @@ int clear_right(void){
     return 0;
 }
 
+int clear_last_word(void){
+    if(!pos){
+        return 0;
+    }
+    size_t dpos=last_char(buffer.arr,pos);
+    int legal=IS_LEGAL(buffer.arr[dpos]);
+    if(!legal){
+        while(dpos&&!IS_LEGAL(buffer.arr[dpos])){
+            dpos=last_char(buffer.arr,dpos);
+        }
+    }
+    while(dpos&&IS_LEGAL(buffer.arr[dpos])){
+        dpos=last_char(buffer.arr,dpos);
+    }
+    if(!IS_LEGAL(buffer.arr[dpos])){
+        dpos=next_char(buffer.arr,dpos);
+    }
+    size_t opos=pos;
+    to_pos(dpos);
+    clean_show(pos);
+    memmove(buffer.arr+dpos,buffer.arr+opos,buffer.size-opos);
+    for(size_t i=0;i<opos-dpos;i++){
+        da_pop(sizeof(char),&buffer);
+    }
+    output(buffer.arr,buffer.size-pos);
+    pos=buffer.size;
+    to_pos(dpos);
+    return 0;
+}
+
 int last_history(void){
     if(!history_pos){
         return 0;
@@ -423,7 +475,7 @@ int last_history(void){
 }
 
 int next_history(void){
-    if(history_pos>=history.size-1){
+    if(!history.size||history_pos>=history.size-1){
         return 0;
     }
 

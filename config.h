@@ -4,13 +4,13 @@
 #include "mnsh.h"
 
 key_setting_t key_setting[] = {
-    { 0x01 , NULL , "to_start"    },
-    { 0x02 , NULL , "to_start"    },
-    { 0x06 , NULL , "to_end"      },
-    { 0x08 , NULL , "backspace"   },
-    { 0x0B , NULL , "clear_right" },
-    { 0x17 , NULL , "clear_left"  },
-    { 0x7F , NULL , "backspace"   },
+    { 0x01 , NULL , "to_start"        },
+    { 0x02 , NULL , "to_start"        },
+    { 0x06 , NULL , "to_end"          },
+    { 0x08 , NULL , "backspace"       },
+    { 0x0B , NULL , "clear_right"     },
+    { 0x17 , NULL , "clear_last_word" },
+    { 0x7F , NULL , "backspace"       },
 
     { 0x1B , "[3~"   , "delete"       },
     { 0x1B , "[C"    , "right"        },
