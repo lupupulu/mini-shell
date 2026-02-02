@@ -15,6 +15,8 @@ size_t history_pos;
 
 da_variable variable;
 da_env env;
+da_variable tmp_env;
+da_alias alias;
 
 char pathbuf[PATH_BUF_SIZE];
 char echobuf[ECHO_BUF_SIZE];
@@ -500,15 +502,22 @@ int next_history(void){
 
 
 variable_t *find_var(const char *var){
+    size_t len=0;
+    while(var[len]!='='&&var[len]!='\0'){
+        len++;
+    }
     for(size_t i=0;i<variable.size;i++){
-        if(!(variable.arr[i].umask&VAR_EXIST)){
+        if(!(variable.arr[i].umask&VAR_EXIST)||len!=variable.arr[i].eq_loc){
             continue;
         }
-        size_t j=0;
-        while(j<variable.arr[i].eq_loc&&var[j]&&var[j]==variable.arr[i].var[j]){
-            j++;
+        int flg=0;
+        for(size_t j=0;j<len;j++){
+            if(variable.arr[i].var[j]!=var[j]){
+                flg=1;
+                break;
+            }
         }
-        if(j==variable.arr[i].eq_loc&&(var[j]=='\0'||var[j]=='=')){
+        if(!flg){
             return &variable.arr[i];
         }
     }
@@ -620,6 +629,96 @@ void unset_env(size_t i){
     da_pop(sizeof(char*),&env);
 }
 
+int set_tmp_env(char *str){
+    variable_t *var=find_var(str);
+    if(var){
+        if(var->umask&VAR_READONLY){
+            return 127;
+        }
+        da_add(sizeof(variable_t),&tmp_env,var);
+        size_t len=strlen(var->var);
+        void *p=malloc(sizeof(char)*(len+1));
+        memcpy(p,var->var,sizeof(char)*(len+1));
+        var->var=p;
+        set_var(str,VAR_EXPORT);
+        return 0;
+    }
+    variable_t tmp={.var=str,.umask=0,.env=1,.eq_loc=0};
+    da_add(sizeof(variable_t),&tmp_env,&tmp);
+    set_var(str,VAR_EXPORT);
+    return 0;
+}
+int recovery_tmp_env(void){
+    for(size_t i=0;i<tmp_env.size;i++){
+        if(tmp_env.arr[i].umask){
+            variable_t *var=find_var(tmp_env.arr[i].var);
+            free(var->var);
+            memcpy(var,&tmp_env.arr[i],sizeof(variable_t));
+        }else{
+            unset_var(tmp_env.arr[i].var);
+        }
+    }
+    da_clear(&tmp_env);
+    return 0;
+}
+
+alias_t *find_alias(const char *als){
+    size_t len=0;
+    while(als[len]!='='&&als[len]!='\0'){
+        len++;
+    }
+    for(size_t i=0;i<alias.size;i++){
+        if(alias.arr[i].eq_loc!=len){
+            continue;
+        }
+        int flg=0;
+        for(size_t j=0;j<len;j++){
+            if(alias.arr[i].var[j]!=als[j]){
+                flg=1;
+                break;
+            }
+        }
+        if(!flg){
+            return &alias.arr[i];
+        }
+    }
+    return NULL;
+}
+int set_alias(const char *als){
+    alias_t *a=find_alias(als);
+    if(a){
+        size_t len=strlen(a->var+a->eq_loc+1);
+        void *p=realloc(a->var,sizeof(char)*(a->eq_loc+len+1));
+        if(!p){
+            return 127;
+        }
+        a->var=p;
+        memcpy(a->var+a->eq_loc+1,als+a->eq_loc+1,len+1);
+    }
+    size_t len=strlen(als);
+    alias_t tmp={
+        .var=malloc(sizeof(char)*(len+1)),
+        .eq_loc=0
+    };
+    memcpy(tmp.var,als,sizeof(char)*(len+1));
+    while(tmp.var[tmp.eq_loc]!='='){
+        tmp.eq_loc++;
+    }
+
+    da_add(sizeof(alias_t),&alias,&tmp);
+
+    return 0;
+}
+int unset_alias(const char *als){
+    alias_t *a=find_alias(als);
+    if(!a){
+        return 127;
+    }
+    free(a->var);
+    memcpy(a,&alias.arr[alias.size-1],sizeof(alias_t));
+    da_pop(sizeof(alias),&alias);
+    return 0;
+}
 
 MAKE_HASH_FUNCTION
 
@@ -809,6 +908,9 @@ int sh_export(char *const *argv){
 
     int ret=is_variable(argv[1]);
     if(!ret){
+        write(STDERR_FILENO,"export: ",8);
+        write(STDERR_FILENO,argv[1],strlen(argv[1]));
+        write(STDERR_FILENO,"\n",1);
         return 127;
     }
     return set_var(argv[1],VAR_EXPORT)?127:0;
@@ -823,6 +925,13 @@ int sh_readonly(char *const *argv){
             }
         }
         return 0;
+    }
+    int ret=is_variable(argv[1]);
+    if(!ret){
+        write(STDERR_FILENO,"readonly: ",8);
+        write(STDERR_FILENO,argv[1],strlen(argv[1]));
+        write(STDERR_FILENO,"\n",1);
+        return 127;
     }
     return set_var(argv[1],VAR_READONLY)?127:0;
 }
@@ -959,10 +1068,28 @@ int sh_umask(char *const *argv){
     return 0;
 }
 int sh_alias(char *const *argv){
-    return 0;
+    if(!argv[1]){
+        for(unsigned i=0;i<alias.size;i++){
+            write(STDOUT_FILENO,"alias ",6);
+            write(STDOUT_FILENO,alias.arr[i].var,strlen(alias.arr[i].var));
+            write(STDOUT_FILENO,"\n",1);
+        }
+        return 0;
+    }
+    int ret=is_variable(argv[1]);
+    if(!ret){
+        write(STDERR_FILENO,"alias: ",7);
+        write(STDERR_FILENO,argv[1],strlen(argv[1]));
+        write(STDERR_FILENO,"\n",1);
+        return 127;
+    }
+    return set_alias(argv[1])?127:0;
 }
 int sh_unalias(char *const *argv){
-    return 0;
+    if(!argv[1]){
+        return 127;
+    }
+    return unset_alias(argv[1])?127:0;
 }
 int sh_type(char *const *argv){
     return 0;
