@@ -21,6 +21,9 @@ int is_script;
 
 int execute_command_parent(command_t *cmd);
 int execute_command_child(command_t *cmd);
+#define EXE_START 0
+#define EXE_END   1
+int execute_parse_cmd(command_t *cmd,int st);
 
 
 int cm_init(command_t *cm);
@@ -30,9 +33,11 @@ int cm_clear(command_t *cm);
 
 int insert_to_buffer(const char *str,size_t len,size_t pos);
 int delete_to_buffer(size_t len,size_t pos);
+
 char parse_variable(da_str *buf,const char *str,size_t *inter);
 char parse_single_quote(da_str *buf,const char *str,size_t *inter);
 char parse_quote(da_str *buf,const char *str,size_t *inter);
+char parse_home(da_str *buf,const char *str,size_t *inter);
 int parse_item(da_str *buf,const char *str,size_t *inter);
 int parse_command(command_t *now,size_t *inter);
 int parse_buffer(void);
@@ -304,6 +309,19 @@ char parse_quote(da_str *buf,const char *str,size_t *inter){
     return 0;
 }
 
+char parse_home(da_str *buf,const char *str,size_t *inter){
+    size_t i=*inter;
+    i++;
+    const char *home=get_var("HOME");
+    size_t j=0;
+    while(home[j]){
+        da_add(sizeof(char),buf,&home[j]);
+        j++;
+    }
+    *inter=i;
+    return 0;
+}
+
 int parse_item(da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
     while(str[i]==' '){
@@ -334,6 +352,15 @@ int parse_item(da_str *buf,const char *str,size_t *inter){
             da_add(sizeof(char),buf,&str[i]);
             i++;
             break;
+        case '~':
+            if((!i||(ret&0b10&&str[i-1]=='=')||str[i-1]==' ')&&(!str[i+1]||str[i+1]=='/'||str[i+1]==' ')){
+                ret|=0b1;
+                r=parse_home(buf,str,&i);
+                break;
+            }
+            da_add(sizeof(char),buf,&str[i]);
+            i++;
+            break;
         case '\\':
             ret|=0b1;
             i++;
@@ -354,7 +381,6 @@ int parse_item(da_str *buf,const char *str,size_t *inter){
 }
 
 int parse_command(command_t *now,size_t *inter){
-    int is_parse=0;
     int is_parsing_item=0;
     while(buffer.arr[*inter]!='\0'){
         da_str buf;
@@ -362,7 +388,7 @@ int parse_command(command_t *now,size_t *inter){
         int r=parse_item(&buf,buffer.arr,inter);
         da_add(sizeof(char),&buf,"");
 
-        if(r&0b10&&!is_parsing_item){
+        if(r&0b10&&!is_parsing_item&&is_variable(buf.arr)){
             cm_add_cmd(now,buf.arr);
             free(buf.arr);
         }else{
@@ -380,6 +406,10 @@ int parse_command(command_t *now,size_t *inter){
 int parse_buffer(void){
     static da_str tmp_buffer;
     static da_command commands;
+
+    if(!buffer.arr){
+        return 0;
+    }
 
     size_t i=0;
     while(buffer.arr[i]==' '){
@@ -424,6 +454,22 @@ int parse_buffer(void){
 
 
 
+int execute_parse_cmd(command_t *cmd,int st){
+    if(st==EXE_END){
+        recovery_tmp_env();
+    }
+    size_t i=0;
+    darray_t(char*) tmp;
+    da_init(&tmp);
+    while(i<cmd->cmdlen&&cmd->cmds[i]){
+        if(is_variable(cmd->cmds+i)&&st==EXE_START){
+            set_tmp_env(cmd->cmds+i);
+        }
+        i+=strlen(cmd->cmds+i)+1;
+    }
+    return 0;
+}
+
 int execute_command_child(command_t *cmd){
     set_terminal_echo(1);
     cmd_execvpe(cmd->argv[0],cmd->argv,env.arr);
@@ -434,13 +480,27 @@ int execute_command_child(command_t *cmd){
 }
 
 int execute_command_parent(command_t *cmd){
+    if(!cmd->argv[0]){
+        size_t i=0;
+        while(i<cmd->cmdlen&&cmd->cmds[i]){
+            if(is_variable(cmd->cmds+i)){
+                set_var(cmd->cmds+i,0);
+            }
+            i+=strlen(cmd->cmds+i);
+        }
+        return 0;
+    }
     command_func f=is_builtin_cmd(cmd->argv);
     if(f){
-        return f(cmd->argv);
+        execute_parse_cmd(cmd,EXE_START);
+        int r=f(cmd->argv);
+        execute_parse_cmd(cmd,EXE_END);
+        return r;
     }
     int pid=fork();
 
     if(pid==0){
+        execute_parse_cmd(cmd,EXE_START);
         _exit(execute_command_child(cmd));
     }else if(pid>0){
         int status;

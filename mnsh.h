@@ -135,6 +135,7 @@ typedef struct{
 }variable_t;
 typedef darray_t(variable_t) da_variable;
 extern da_variable variable;
+extern da_variable tmp_env;
 typedef darray_t(char*) da_env;
 extern da_env env;
 
@@ -142,13 +143,25 @@ extern da_env env;
 #define VAR_READONLY 0b00000010
 #define VAR_ARRAY    0b00000100
 #define VAR_EXIST    0b10000000
-unsigned parse_var(char *buf,unsigned len,const char *str);
 variable_t *find_var(const char *var);
 const char *get_var(const char *var);
 int set_var(const char *var,char umask);
 int unset_var(const char *var);
 size_t set_env(char *str);
 void unset_env(size_t i);
+int set_tmp_env(char *str);
+int recovery_tmp_env(void);
+
+typedef struct{
+    char *var;
+    size_t eq_loc;
+}alias_t;
+typedef darray_t(alias_t) da_alias;
+extern da_alias alias;
+
+alias_t *find_alias(const char *als);
+int set_alias(const char *als);
+int unset_alias(const char *als);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];
