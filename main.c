@@ -21,9 +21,15 @@ int is_script;
 
 int execute_command_parent(command_t *cmd);
 int execute_command_child(command_t *cmd);
-#define EXE_START 0
-#define EXE_END   1
-int execute_parse_cmd(command_t *cmd,int st);
+
+#define EXE_START  0b01
+#define EXE_PARENT 0b10
+
+#define EXE_PIPE   0b01
+
+int exe_parse_pipe(const char *cmd,int st,int *pipes,int *prev_pipe);
+int exe_parse_cmd(command_t *cmd,int st);
+
 
 
 int cm_init(command_t *cm);
@@ -34,12 +40,17 @@ int cm_clear(command_t *cm);
 int insert_to_buffer(const char *str,size_t len,size_t pos);
 int delete_to_buffer(size_t len,size_t pos);
 
-char parse_variable(da_str *buf,const char *str,size_t *inter);
+char parse_variable(command_t *now,da_str *buf,const char *str,size_t *inter);
 char parse_single_quote(da_str *buf,const char *str,size_t *inter);
-char parse_quote(da_str *buf,const char *str,size_t *inter);
+char parse_quote(command_t *now,da_str *buf,const char *str,size_t *inter);
 char parse_home(da_str *buf,const char *str,size_t *inter);
-int parse_item(da_str *buf,const char *str,size_t *inter);
-int parse_command(command_t *now,size_t *inter);
+
+#define IS_PARSED         0b0001
+#define PARSE_IS_VARIABLE 0b0010
+#define PARSE_IS_CONTINUE 0b0100
+
+int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter);
+int parse_command(command_t *now,const char *str,size_t *inter,int flg);
 int parse_buffer(void);
 
 int main(int argc,char *const *argv,char *const *envi){
@@ -197,28 +208,9 @@ int delete_to_buffer(size_t len,size_t pos){
 
 int quote_flg=0;
 
-char parse_variable(da_str *buf,const char *str,size_t *inter){
+char parse_variable(command_t *now,da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
     if(str[i+1]=='@'&&(str[i+2]==' '||str[i+2]=='\0')){
-        if(quote_flg){
-            buffer.arr[i+1]='*';
-            return parse_variable(buf,str,inter);
-        }
-        delete_to_buffer(2,i+1);
-        size_t cnt=0;
-        for(int j=1;j<=g_argc;j++){
-            size_t len=strlen(g_argv[j]);
-            insert_to_buffer("\'",1,cnt+i);
-            cnt+=1;
-            insert_to_buffer(g_argv[j],len,cnt+i);
-            cnt+=len;
-            insert_to_buffer("\'",1,cnt+i);
-            cnt+=1;
-            if(j!=g_argc){
-                insert_to_buffer(" ",1,cnt+i);
-                cnt+=1;
-            }
-        }
         return 0;
     }
 
@@ -267,7 +259,10 @@ char parse_variable(da_str *buf,const char *str,size_t *inter){
 
 char parse_single_quote(da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
-    i++;
+    if(!quote_flg){
+        quote_flg='\'';
+        i++;
+    }
     while(str[i]!='\0'&&str[i]!='\''){
         da_add(sizeof(char),buf,&str[i]);
         i++;
@@ -275,20 +270,23 @@ char parse_single_quote(da_str *buf,const char *str,size_t *inter){
     if(str[i]=='\0'){
         return '\'';
     }
+    quote_flg=0;
     i++;
     *inter=i;
     return 0;
 }
 
-char parse_quote(da_str *buf,const char *str,size_t *inter){
+char parse_quote(command_t *now,da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
-    i++;
-    quote_flg=1;
+    if(!quote_flg){
+        quote_flg='\"';
+        i++;
+    }
     while(str[i]!='\0'&&str[i]!='\"'){
         switch(str[i]){
         case '$':
             *inter=i;
-            parse_variable(buf,str,inter);
+            parse_variable(now,buf,str,inter);
             break;
         case '\\':
             if(!IS_LEGAL(str[i])){
@@ -322,10 +320,13 @@ char parse_home(da_str *buf,const char *str,size_t *inter){
     return 0;
 }
 
-int parse_item(da_str *buf,const char *str,size_t *inter){
+int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
     while(str[i]==' '){
         i++;
+    }
+    if(str[i]=='#'){
+        return 0;
     }
 
     int ret=0;
@@ -334,27 +335,27 @@ int parse_item(da_str *buf,const char *str,size_t *inter){
         char r=0;
         switch(str[i]){
         case '$':
-            ret|=0b1;
-            r=parse_variable(buf,str,&i);
+            ret|=IS_PARSED;
+            r=parse_variable(now,buf,str,&i);
             break;
         case '\'':
-            ret|=0b1;
+            ret|=IS_PARSED;
             r=parse_single_quote(buf,str,&i);
             break;
         case '\"':
-            ret|=0b1;
-            r=parse_quote(buf,str,&i);
+            ret|=IS_PARSED;
+            r=parse_quote(now,buf,str,&i);
             break;
         case '=':
-            if(!(ret&0b1)){
-                ret|=0b10;
+            if(!(ret&IS_PARSED)){
+                ret|=PARSE_IS_VARIABLE;
             }
             da_add(sizeof(char),buf,&str[i]);
             i++;
             break;
         case '~':
-            if((!i||(ret&0b10&&str[i-1]=='=')||str[i-1]==' ')&&(!str[i+1]||str[i+1]=='/'||str[i+1]==' ')){
-                ret|=0b1;
+            if((!i||(ret&PARSE_IS_VARIABLE&&str[i-1]=='=')||str[i-1]==' ')&&(!str[i+1]||str[i+1]=='/'||str[i+1]==' ')){
+                ret|=IS_PARSED;
                 r=parse_home(buf,str,&i);
                 break;
             }
@@ -362,15 +363,22 @@ int parse_item(da_str *buf,const char *str,size_t *inter){
             i++;
             break;
         case '\\':
-            ret|=0b1;
+            ret|=IS_PARSED;
             i++;
+            if(str[i]=='\0'){
+                r='\n';
+                break;
+            }
+            da_add(sizeof(char),buf,&str[i]);
+            i++;
+            break;
         default:
             da_add(sizeof(char),buf,&str[i]);
             i++;
             break;
         }
         if(r){
-            ret|=0b100;
+            ret|=PARSE_IS_CONTINUE;
             ret|=r<<8;
             break;
         }
@@ -380,32 +388,74 @@ int parse_item(da_str *buf,const char *str,size_t *inter){
     return ret;
 }
 
-int parse_command(command_t *now,size_t *inter){
-    int is_parsing_item=0;
-    while(buffer.arr[*inter]!='\0'){
+int parse_command(command_t *now,const char *str,size_t *inter,int flg){
+    static da_str tmp_item;
+
+    int is_parsing_item=0,is_first_item=1;
+    static int last_is_pipe=0;
+
+    while(str[*inter]!='\0'){
         da_str buf;
-        da_init(&buf);
-        int r=parse_item(&buf,buffer.arr,inter);
+        if(tmp_item.size){
+            memcpy(&buf,&tmp_item,sizeof(da_str));
+            memset(&tmp_item,0,sizeof(da_str));
+        }else{
+            da_init(&buf);
+        }
+        
+        int r=parse_item(now,&buf,str,inter);
+        if(r&PARSE_IS_CONTINUE){
+            if(quote_flg){
+                da_add(sizeof(char),&buf,"\n");
+            }
+            memcpy(&tmp_item,&buf,sizeof(da_str));
+            return 1;
+        }
+        if(!buf.size){
+            break;
+        }
+
         da_add(sizeof(char),&buf,"");
 
-        if(r&0b10&&!is_parsing_item&&is_variable(buf.arr)){
+        if(is_first_item){
+            const char *als=get_alias(buf.arr);
+            if(als&&!flg){
+                free(buf.arr);
+                size_t i=0;
+                parse_command(now,als,&i,1);
+                now->argvn--;
+            }else{
+                cm_add_item(now,buf.arr);
+            }
+            is_parsing_item=1;
+            is_first_item=0;
+        }else if(!r&IS_PARSED&&buf.size==2&&buf.arr[0]=='|'){
+            cm_add_cmd(now,"| ");
+            free(buf.arr);
+            last_is_pipe=1;
+            return 0;
+        }else if(r&PARSE_IS_VARIABLE&&!is_parsing_item&&is_variable(buf.arr)){
             cm_add_cmd(now,buf.arr);
             free(buf.arr);
         }else{
             is_parsing_item=1;
             cm_add_item(now,buf.arr);
         }
-        if(r&0b100){
-            return 1;
-        }
+    }
+    if(last_is_pipe){
+        cm_add_cmd(now,"|e");
+        last_is_pipe=0;
     }
     cm_add_item(now,NULL);
     return 0;
 }
 
 int parse_buffer(void){
-    static da_str tmp_buffer;
     static da_command commands;
+    static command_t cmd;
+
+    static char *tmp_buffer;
+    static size_t tmp_buffer_size;
 
     if(!buffer.arr){
         return 0;
@@ -419,21 +469,39 @@ int parse_buffer(void){
         return 0;
     }
 
+    if(tmp_buffer_size){
+        da_pop(sizeof(char*),&history);
+    }
+
     da_add(sizeof(char),&buffer,"");
-    char *p=malloc(sizeof(char)*(buffer.size));
-    memcpy(p,buffer.arr,sizeof(char)*buffer.size);
-    da_add(sizeof(char*),&history,&p);
+    tmp_buffer=realloc(tmp_buffer,sizeof(char)*(tmp_buffer_size+buffer.size));
+    memcpy(tmp_buffer+tmp_buffer_size,buffer.arr,sizeof(char)*buffer.size);
     buffer.size--;
+    tmp_buffer_size+=buffer.size;
 
     int ret=0;
     while(i<buffer.size){
-        command_t cmd;
-        cm_init(&cmd);
-        ret=parse_command(&cmd,&i);
+        ret=parse_command(&cmd,buffer.arr,&i,0);
         if(ret){
+            if(quote_flg){
+                tmp_buffer=realloc(tmp_buffer,sizeof(char)*(tmp_buffer_size+2));
+                tmp_buffer[tmp_buffer_size++]='\n';
+                tmp_buffer[tmp_buffer_size]='\0';
+            }else{
+                tmp_buffer[--tmp_buffer_size]='\0';
+            }
+            da_add(sizeof(char*),&history,&tmp_buffer);
             return 1;
         }
         da_add(sizeof(command_t),&commands,&cmd);
+        cm_init(&cmd);
+    }
+
+    da_add(sizeof(char*),&history,&tmp_buffer);
+
+    if(tmp_buffer_size){
+        tmp_buffer=NULL;
+        tmp_buffer_size=0;
     }
 
     for(size_t i=0;i<commands.size;i++){
@@ -454,20 +522,65 @@ int parse_buffer(void){
 
 
 
-int execute_parse_cmd(command_t *cmd,int st){
-    if(st==EXE_END){
+int exe_parse_pipe(const char *cmd,int st,int *pipes,int *prev_pipe){
+    if(st&EXE_PARENT){
+        if(st&EXE_START){
+            if(cmd[1]!='e'){
+                pipe(pipes);
+                return EXE_PIPE;
+            }
+            return 0;
+        }
+
+        if(cmd[1]=='e'){
+            close(*prev_pipe);
+            *prev_pipe=-1;
+            return 0;
+        }
+        close(pipes[1]);
+        if(*prev_pipe>0){
+            close(*prev_pipe);
+        }
+        *prev_pipe=pipes[0];
+        return 0;
+    }
+
+    if(*prev_pipe>0){
+        dup2(*prev_pipe,STDIN_FILENO);
+        close(*prev_pipe);
+    }
+
+    if(cmd[1]!='e'){
+        close(pipes[0]);
+        dup2(pipes[1],STDOUT_FILENO);
+        close(pipes[1]);
+    }
+    return 0;
+}
+
+int exe_parse_cmd(command_t *cmd,int st){
+    static int pipes[2];
+    static int prev_pipe=-1;
+
+    if(!st&EXE_START){
         recovery_tmp_env();
     }
+
     size_t i=0;
     darray_t(char*) tmp;
     da_init(&tmp);
+
+    int r=0;
+
     while(i<cmd->cmdlen&&cmd->cmds[i]){
-        if(is_variable(cmd->cmds+i)&&st==EXE_START){
+        if(cmd->cmds[i]=='|'){
+            r|=exe_parse_pipe(cmd->cmds+i,st,pipes,&prev_pipe);
+        }else if(st&EXE_START&&is_variable(cmd->cmds+i)){
             set_tmp_env(cmd->cmds+i);
         }
         i+=strlen(cmd->cmds+i)+1;
     }
-    return 0;
+    return r;
 }
 
 int execute_command_child(command_t *cmd){
@@ -491,21 +604,28 @@ int execute_command_parent(command_t *cmd){
         return 0;
     }
     command_func f=is_builtin_cmd(cmd->argv);
-    if(f){
-        execute_parse_cmd(cmd,EXE_START);
-        int r=f(cmd->argv);
-        execute_parse_cmd(cmd,EXE_END);
+    int r=exe_parse_cmd(cmd,EXE_START|EXE_PARENT);
+
+    if(f&&!r&EXE_PIPE){
+        r=f(cmd->argv);
+        exe_parse_cmd(cmd,EXE_PARENT);
         return r;
     }
-    int pid=fork();
 
+    int pid=fork();
     if(pid==0){
-        execute_parse_cmd(cmd,EXE_START);
-        _exit(execute_command_child(cmd));
+        exe_parse_cmd(cmd,EXE_START);
+        if(f){
+            r=f(cmd->argv);
+        }else{
+            r=execute_command_child(cmd);
+        }
+        _exit(r);
     }else if(pid>0){
         int status;
         wait(&status);
         set_terminal_echo(0);
+        exe_parse_cmd(cmd,EXE_PARENT);
         if(!WIFEXITED(status)){
             return 127;
         }

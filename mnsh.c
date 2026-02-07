@@ -684,6 +684,10 @@ alias_t *find_alias(const char *als){
     }
     return NULL;
 }
+const char *get_alias(const char *als){
+    alias_t *a=find_alias(als);
+    return a?(a->var+a->eq_loc+1):NULL;
+}
 int set_alias(const char *als){
     alias_t *a=find_alias(als);
     if(a){
