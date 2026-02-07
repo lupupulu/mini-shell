@@ -160,6 +160,7 @@ typedef darray_t(alias_t) da_alias;
 extern da_alias alias;
 
 alias_t *find_alias(const char *als);
+const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);
 
