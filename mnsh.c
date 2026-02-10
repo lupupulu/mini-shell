@@ -3,6 +3,18 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <termios.h>
+
+int g_argc;
+char g_argc_s[MAX_LL_SIZE];
+char* const* g_argv;
+int g_ret;
+char g_ret_s[MAX_LL_SIZE];
+int g_pid;
+char g_pid_s[MAX_LL_SIZE];
+
+codeset_t codeset;
+int is_script;
 
 int now_is_bufffer=1;
 int echo=1;
@@ -65,8 +77,8 @@ int input(unsigned umask){
         ret=read(STDIN_FILENO,&c,1);
         if(c==0x04||ret==0){
             if(!is_script){
-                echo_to_buf("\nexit\n",6);
-                echo_buf_to_stdout();
+                // echo_to_buf("\nexit\n",6);
+                // echo_buf_to_stdout();
                 return -1;
             }
             return 2;
@@ -566,9 +578,9 @@ int set_var(const char *var,char umask){
         memcpy(v->var+v->eq_loc+1,var+v->eq_loc+1,len-v->eq_loc-1);
         v->var[len]='\0';
 
-        if(v->umask&VAR_EXPORT&&!umask&VAR_EXPORT){
+        if(v->umask&VAR_EXPORT&&!(umask&VAR_EXPORT)){
             unset_env(v->env);
-        }else if(!v->umask&VAR_EXPORT&&umask&VAR_EXPORT){
+        }else if(!(v->umask&VAR_EXPORT)&&umask&VAR_EXPORT){
             v->env=set_env(v->var);
         }
 
@@ -663,6 +675,10 @@ int recovery_tmp_env(void){
 }
 
 alias_t *find_alias(const char *als){
+    if(is_script){
+        return NULL;
+    }
+
     size_t len=0;
     while(als[len]!='='&&als[len]!='\0'){
         len++;
@@ -689,6 +705,10 @@ const char *get_alias(const char *als){
     return a?(a->var+a->eq_loc+1):NULL;
 }
 int set_alias(const char *als){
+    if(is_script){
+        return 0;
+    }
+
     alias_t *a=find_alias(als);
     if(a){
         size_t len=strlen(a->var+a->eq_loc+1);
@@ -840,6 +860,57 @@ int is_variable(const char *cmd){
     return 0;
 }
 
+int is_redirector(const char *cmd,size_t *inter,int *a){
+    const struct{
+        char key[4];
+        int value;
+    }redirector[]={
+        {.key="<"  ,.value=REDIR_IN           }, 
+        {.key=">"  ,.value=REDIR_OUT          },
+        {.key=">>" ,.value=REDIR_OUT_ADD      },
+        {.key=">&" ,.value=REDIR_DUP          },
+        {.key="<&" ,.value=REDIR_DUP          },
+        {.key="<<" ,.value=REDIR_HERE_DOCUMENT},
+        {.key="<<<",.value=REDIR_HERE_STRING  },
+        {.key=">&-",.value=REDIR_CLOSE        },
+        {.key="<&-",.value=REDIR_CLOSE        }
+    };
+    size_t redir_size=sizeof(redirector)/sizeof(redirector[0]);
+
+    size_t k=0;
+    int ta=0;
+    while(cmd[k]>='0'&&cmd[k]<='9'){
+        ta*=10;
+        ta+=cmd[k]-'0';
+        k++;
+    }
+
+    size_t i=0,j=0;
+    int v=0;
+    while(cmd[i+k]!='\0'){
+        while(j<redir_size&&redirector[j].key[i]!=cmd[i+k]){
+            j++;
+        }
+        if(j==redir_size){
+            break;
+        }
+        v=redirector[j].value;
+        i++;
+    }
+    if(inter){
+        *inter=k+i;
+    }
+    if(a){
+        if(k){
+            *a=ta;
+        }else{
+            *a=-1;
+        }
+    }
+    return v;
+}
+
+
 int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
     const char *p=file_is_exist(file,F_OK|X_OK,1);
     if(p){
@@ -847,6 +918,44 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
     }
     return -1;
 }
+
+
+#ifdef BASIC_INPUT
+int set_terminal_echo(int enable){
+    return 0;
+}
+#else
+int set_terminal_echo(int enable){
+    if(is_script){
+        return 0;
+    }
+
+    static struct termios original_termios;
+    static int is_saved=0;
+    struct termios new_termios;
+
+    if(!is_saved){
+        if(tcgetattr(STDIN_FILENO,&original_termios)==-1){
+            return 1;
+        }
+        is_saved=1;
+    }
+
+    new_termios=original_termios;
+
+    if(!enable){
+        new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
+        new_termios.c_cc[VMIN]=1;
+        new_termios.c_cc[VTIME]=0;
+    }
+
+    if(tcsetattr(STDIN_FILENO,TCSANOW,&new_termios)==-1){
+        return 1;
+    }
+
+    return 0;
+}
+#endif
 
 int sh_cd(char *const *argv){
     int r=1;

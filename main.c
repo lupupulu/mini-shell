@@ -1,4 +1,3 @@
-#include <termios.h>
 #include <unistd.h>
 #include <memory.h>
 #include <sys/wait.h>
@@ -7,26 +6,18 @@
 #include <stdlib.h>
 #include <fcntl.h>
 
-int g_argc;
-char g_argc_s[MAX_LL_SIZE];
-char* const* g_argv;
-int g_ret;
-char g_ret_s[MAX_LL_SIZE];
-int g_pid;
-char g_pid_s[MAX_LL_SIZE];
-
-codeset_t codeset;
-
-int is_script;
-
 int execute_command_parent(command_t *cmd);
 int execute_command_child(command_t *cmd);
 
-#define EXE_START  0b01
-#define EXE_PARENT 0b10
+#define EXE_START  0b0001
+#define EXE_PARENT 0b0010
+#define EXE_CLEAR  0b0100
 
-#define EXE_PIPE   0b01
+#define EXE_PIPE       0b0001
+#define EXE_WRONG_FILE 0b0010
+#define EXE_WRONG_PIPE 0b0100
 
+int exe_parse_redirector(int st,int redir,int a,const char *file);
 int exe_parse_pipe(const char *cmd,int st,int *pipes,int *prev_pipe);
 int exe_parse_cmd(command_t *cmd,int st);
 
@@ -122,9 +113,7 @@ int main(int argc,char *const *argv,char *const *envi){
             return 127;
         case -1:
             set_terminal_echo(1);
-#ifdef BASIC_INPUT
             printf("\nexit\n");
-#endif
             return 0;
         case 2:
         case 0:
@@ -148,48 +137,10 @@ int main(int argc,char *const *argv,char *const *envi){
 
     set_terminal_echo(1);
 
-#ifdef BASIC_INPUT
     printf("exit\n");
-#endif
 
     return 0;
 }
-#ifdef BASIC_INPUT
-int set_terminal_echo(int enable){
-    return 0;
-}
-#else
-int set_terminal_echo(int enable){
-    if(is_script){
-        return 0;
-    }
-
-    static struct termios original_termios;
-    static int is_saved=0;
-    struct termios new_termios;
-
-    if(!is_saved){
-        if(tcgetattr(STDIN_FILENO,&original_termios)==-1){
-            return 1;
-        }
-        is_saved=1;
-    }
-
-    new_termios=original_termios;
-
-    if(!enable){
-        new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
-        new_termios.c_cc[VMIN]=1;
-        new_termios.c_cc[VTIME]=0;
-    }
-
-    if(tcsetattr(STDIN_FILENO,TCSANOW,&new_termios)==-1){
-        return 1;
-    }
-
-    return 0;
-}
-#endif
 
 int insert_to_buffer(const char *str,size_t len,size_t pos){
     da_resize(sizeof(char),&buffer,buffer.size+len);
@@ -328,12 +279,39 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
     if(str[i]=='#'){
         return 0;
     }
+    *inter=i;
 
     int ret=0;
 
     while(str[i]!='\0'&&str[i]!=' '){
         char r=0;
         switch(str[i]){
+        case '|':
+            if(i==*inter){
+                da_add(sizeof(char),buf,"|");
+                i++;
+            }
+            *inter=i;
+            return ret;
+        case '>':
+        case '<':
+            size_t j=0;
+            int redir=is_redirector(str+*inter,&j,NULL);
+            if(redir){
+                for(size_t k=0;k<j;k++){
+                    da_add(sizeof(char),buf,&str[*inter+k]);
+                }
+                *inter+=j;
+                return ret;
+            }else if(is_redirector(str+i,NULL,NULL)){
+                *inter=i;
+                return ret;
+            }
+            while(str[i]=='>'||str[i]=='<'){
+                da_add(sizeof(char),buf,&str[i]);
+                i++;
+            }
+            break;
         case '$':
             ret|=IS_PARSED;
             r=parse_variable(now,buf,str,&i);
@@ -392,6 +370,7 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
     static da_str tmp_item;
 
     int is_parsing_item=0,is_first_item=1;
+    int last_is_redirector=0;
     static int last_is_pipe=0;
 
     while(str[*inter]!='\0'){
@@ -417,7 +396,11 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
 
         da_add(sizeof(char),&buf,"");
 
-        if(is_first_item){
+        if(last_is_redirector){
+            cm_add_cmd(now,buf.arr);
+            free(buf.arr);
+            last_is_redirector=0;
+        }else if(is_first_item&&!is_script){
             const char *als=get_alias(buf.arr);
             if(als&&!flg){
                 free(buf.arr);
@@ -429,11 +412,16 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
             }
             is_parsing_item=1;
             is_first_item=0;
-        }else if(!r&IS_PARSED&&buf.size==2&&buf.arr[0]=='|'){
+        }else if(!(r&IS_PARSED)&&buf.size==2&&buf.arr[0]=='|'){
             cm_add_cmd(now,"| ");
             free(buf.arr);
             last_is_pipe=1;
+            cm_add_item(now,NULL);
             return 0;
+        }else if(!(r&IS_PARSED)&&is_redirector(buf.arr,NULL,NULL)){
+            cm_add_cmd(now,buf.arr);
+            free(buf.arr);
+            last_is_redirector=1;
         }else if(r&PARSE_IS_VARIABLE&&!is_parsing_item&&is_variable(buf.arr)){
             cm_add_cmd(now,buf.arr);
             free(buf.arr);
@@ -521,6 +509,114 @@ int parse_buffer(void){
 }
 
 
+int exe_parse_redirector(int st,int redir,int a,const char *file){
+    static darray_t(int) pips;
+    static int now;
+    if(st==EXE_CLEAR){
+        now=0;
+        for(size_t i=0;i<pips.size;i++){
+            close(pips.arr[i]);
+        }
+        da_fake_clear(&pips);
+        return 0;
+    }
+
+    int fd=-1;
+
+    if(st&EXE_PARENT){
+        int pipes[2]={-1,-1};
+        if(redir==REDIR_HERE_STRING){
+            if(pipe(pipes)!=0){
+                return EXE_WRONG_PIPE;
+            }
+            write(pipes[1],file,strlen(file));
+            write(pipes[1],"\n",1);
+            close(pipes[1]);
+
+            da_add(sizeof(int),&pips,&pipes[0]);
+        }else if(redir==REDIR_HERE_DOCUMENT){
+            if(pipe(pipes)!=0){
+                return EXE_WRONG_PIPE;
+            }
+            size_t len=strlen(file);
+            char *tmp=NULL;
+            size_t tmp_size=0;
+            while(1){
+                da_fake_clear(&buffer);
+                const char *ps=get_var("PS2");
+                write(STDOUT_FILENO,ps,strlen(ps));
+                input(IN_ECHO|IN_HANDLE_CHAR);
+                if(buffer.size==len&&!memcmp(buffer.arr,file,len)){
+                    break;
+                }
+                tmp=realloc(tmp,sizeof(char)*(tmp_size+buffer.size+1));
+                memcpy(tmp+tmp_size,buffer.arr,buffer.size);
+                tmp_size+=buffer.size;
+                tmp[tmp_size++]='\n';
+            }
+            write(pipes[1],tmp,tmp_size);
+            close(pipes[1]);
+
+            free(tmp);
+            da_add(sizeof(int),&pips,&pipes[0]);
+        }
+        return 0;
+    }
+    switch(redir){
+    case REDIR_IN:
+        fd=open(file,O_RDONLY);
+        if(fd<0){
+            return EXE_WRONG_FILE;
+        }
+        if(a<0){
+            a=STDIN_FILENO;
+        }
+        dup2(fd,a);
+        break;
+    case REDIR_OUT:
+        fd=open(file,O_WRONLY|O_CREAT);
+        if(fd<0){
+            return EXE_WRONG_FILE;
+        }
+        if(a<0){
+            a=STDOUT_FILENO;
+        }
+        dup2(fd,a);
+        break;
+    case REDIR_OUT_ADD:
+        fd=open(file,O_APPEND);
+        if(fd<0){
+            return EXE_WRONG_FILE;
+        }
+        if(a<0){
+            a=STDOUT_FILENO;
+        }
+        dup2(fd,a);
+        break;
+    case REDIR_DUP:
+        fd=cmd_str_to_unsigned(file,strlen(file));
+        if(fd<0){
+            return EXE_WRONG_FILE;
+        }
+        dup2(fd,a);
+    case REDIR_HERE_DOCUMENT:
+    case REDIR_HERE_STRING:
+        if(a<0){
+            a=STDIN_FILENO;
+        }
+        dup2(pips.arr[now],a);
+        close(pips.arr[now]);
+        now++;
+        break;
+    case REDIR_CLOSE:
+        if(a<0){
+            break;
+        }
+        close(a);
+        break;
+    }
+    return 0;
+}
 
 int exe_parse_pipe(const char *cmd,int st,int *pipes,int *prev_pipe){
     if(st&EXE_PARENT){
@@ -564,6 +660,7 @@ int exe_parse_cmd(command_t *cmd,int st){
 
     if(!st&EXE_START){
         recovery_tmp_env();
+        exe_parse_redirector(EXE_CLEAR,0,-1,NULL);
     }
 
     size_t i=0;
@@ -572,9 +669,14 @@ int exe_parse_cmd(command_t *cmd,int st){
 
     int r=0;
 
+    int redir=0,fd_a=-1;
+
     while(i<cmd->cmdlen&&cmd->cmds[i]){
         if(cmd->cmds[i]=='|'){
             r|=exe_parse_pipe(cmd->cmds+i,st,pipes,&prev_pipe);
+        }else if(st&EXE_START&&(redir=is_redirector(cmd->cmds+i,NULL,&fd_a))){
+            i+=strlen(cmd->cmds+i)+1;
+            r|=exe_parse_redirector(st,redir,fd_a,cmd->cmds+i);
         }else if(st&EXE_START&&is_variable(cmd->cmds+i)){
             set_tmp_env(cmd->cmds+i);
         }
@@ -606,7 +708,7 @@ int execute_command_parent(command_t *cmd){
     command_func f=is_builtin_cmd(cmd->argv);
     int r=exe_parse_cmd(cmd,EXE_START|EXE_PARENT);
 
-    if(f&&!r&EXE_PIPE){
+    if(f&&!(r&EXE_PIPE)){
         r=f(cmd->argv);
         exe_parse_cmd(cmd,EXE_PARENT);
         return r;

@@ -33,7 +33,6 @@ int da_fake_pop(size_t tp_size,void *array);
 int da_pop(size_t tp_size,void *array);
 int da_fake_clear(void *array);
 int da_clear(void *array);
-// typedef void(*da_copy_func)(void *target,void *src);
 
 extern int g_argc;
 #define MAX_LL_SIZE 21
@@ -98,6 +97,16 @@ extern size_t history_pos;
 #define IN_ECHO        0b01
 #define IN_HANDLE_CHAR 0b10
 int input(unsigned umask);
+
+#define REDIR_IN              1
+#define REDIR_OUT             2
+#define REDIR_OUT_ADD         3
+#define REDIR_DUP             4
+#define REDIR_HERE_DOCUMENT   5
+#define REDIR_HERE_STRING     6
+#define REDIR_CLOSE           7
+int is_redirector(const char *cmd,size_t *inter,int *a);
+
 
 
 #define HASH_SIZE 63
