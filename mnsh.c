@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <termios.h>
+#include <sys/wait.h>
+#define __USE_POSIX
+#include <signal.h>
 
 int g_argc;
 char g_argc_s[MAX_LL_SIZE];
@@ -13,8 +16,11 @@ char g_ret_s[MAX_LL_SIZE];
 int g_pid;
 char g_pid_s[MAX_LL_SIZE];
 
+int now_pid;
+
 codeset_t codeset;
 int is_script;
+int is_child;
 
 int now_is_bufffer=1;
 int echo=1;
@@ -29,6 +35,7 @@ da_variable variable;
 da_env env;
 da_variable tmp_env;
 da_alias alias;
+da_job job;
 
 char pathbuf[PATH_BUF_SIZE];
 char echobuf[ECHO_BUF_SIZE];
@@ -273,6 +280,15 @@ void to_pos(size_t tpos){
     }
     pos=dpos;
     echo_buf_to_stdout();
+}
+
+void echo_unsigned_to_buf(size_t num){
+    if(!echo){
+        return ;
+    }
+    static char tmp[MAX_LL_SIZE];
+    unsigned l=cmd_unsigned_to_str(tmp,MAX_LL_SIZE,num);
+    echo_to_buf(tmp,l);
 }
 
 void echo_to_buf(const char *str,size_t size){
@@ -744,6 +760,92 @@ int unset_alias(const char *als){
     return 0;
 }
 
+char *restore_cmd(da_command *cmds){
+    da_str tmp;
+    da_init(&tmp);
+    for(size_t i=0;i<cmds->size;i++){
+        command_t *now=&cmds->arr[i];
+        size_t j=0;
+        while(j<now->cmdlen&&now->cmds[j]){
+            size_t len=strlen(now->cmds+j);
+            if(!is_variable(now->cmds+j)){
+                j+=len+1;
+                continue;
+            }
+            for(size_t k=0;k<len;k++){
+                da_add(sizeof(char),&tmp,&now->cmds[j+k]);
+            }
+            da_add(sizeof(char),&tmp," ");
+            j+=len+1;
+        }
+
+        for(j=0;j<now->argvn&&now->argv[j];j++){
+            size_t len=strlen(now->argv[j]);
+            for(size_t k=0;k<len;k++){
+                da_add(sizeof(char),&tmp,&now->argv[j][k]);
+            }
+            da_add(sizeof(char),&tmp," ");
+        }
+
+        j=0;
+        while(j<now->cmdlen&&now->cmds[j]){
+            size_t len=strlen(now->cmds+j);
+            if(is_variable(now->cmds+j)||(now->cmds[j]=='|'&&now->cmds[j+1]=='e')){
+                j+=len+1;
+                continue;
+            }
+            if(now->cmds[j]=='|'){
+                da_add(sizeof(char),&tmp,"|");
+                da_add(sizeof(char),&tmp," ");
+                j+=len+1;
+                continue;
+            }
+            for(size_t k=0;k<len;k++){
+                da_add(sizeof(char),&tmp,&now->cmds[j+k]);
+            }
+            da_add(sizeof(char),&tmp," ");
+            j+=len+1;
+        }
+    }
+    da_add(sizeof(char),&tmp,"");
+    return tmp.arr;
+}
+
+int add_job(char *name,int pid){
+    for(size_t i=0;i<job.size;i++){
+        if(!job.arr[i].name){
+            job.arr[i].name=name;
+            job.arr[i].pid=pid;
+            return i+1;
+        }
+    }
+    job_t j={.name=name,.pid=pid};
+    da_add(sizeof(job_t),&job,&j);
+    return job.size;
+}
+int kill_job(int num){
+    return 0;
+}
+int kill_job_pid(int pid){
+    return 0;
+}
+
+
+void sig_int_handler(int sig){
+    if(now_pid<0){
+        exit(127);
+    }else if(now_pid==0){
+        return ;
+    }
+    kill(now_pid,SIGINT);
+    output("\n",1);
+}
+void sig_chld_handler(int sig){
+}
+void sig_tstp_handler(int sig){
+}
+
+
 MAKE_HASH_FUNCTION
 
 command_func is_builtin_cmd(char *const *argv){
@@ -926,7 +1028,7 @@ int set_terminal_echo(int enable){
 }
 #else
 int set_terminal_echo(int enable){
-    if(is_script){
+    if(is_script||is_child){
         return 0;
     }
 

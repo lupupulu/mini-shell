@@ -25,7 +25,7 @@ int da_add(size_t tp_size,void *array,const void *buf){
 
 int da_resize(size_t tp_size,void *array,size_t size){
     darray_t(void) *arr=array;
-    void *p=realloc(arr->arr,size);
+    void *p=realloc(arr->arr,size*tp_size);
     if(!p){
         return 127;
     }
