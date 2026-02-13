@@ -43,7 +43,10 @@ extern char g_ret_s[MAX_LL_SIZE];
 extern int g_pid;
 extern char g_pid_s[MAX_LL_SIZE];
 
+extern int now_pid;
+
 extern int is_script;
+extern int is_child;
 
 int set_terminal_echo(int enable);
 
@@ -63,6 +66,7 @@ size_t get_char_len(char c);
 size_t utf8_get_char_width(const char *c);
 
 #define ECHO_BUF_SIZE 256
+void echo_unsigned_to_buf(size_t num);
 void echo_to_buf(const char *str,size_t size);
 void echo_buf_to_stdout(void);
 
@@ -167,11 +171,25 @@ typedef struct{
 }alias_t;
 typedef darray_t(alias_t) da_alias;
 extern da_alias alias;
-
 alias_t *find_alias(const char *als);
 const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);
+
+typedef struct {
+    char *name;
+    int pid;
+}job_t;
+typedef darray_t(job_t) da_job;
+extern da_job job;
+char *restore_cmd(da_command *cmds);
+int add_job(char *name,int pid);
+int kill_job(int num);
+int kill_job_pid(int pid);
+
+void sig_int_handler(int sig);
+void sig_chld_handler(int sig);
+void sig_tstp_handler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];
