@@ -1,11 +1,12 @@
 #include "mnsh.h"
-#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <termios.h>
 #include <sys/wait.h>
 #define __USE_POSIX
+#define __USE_XOPEN_EXTENDED
+#include <unistd.h>
 #include <signal.h>
 
 int g_argc;
@@ -17,8 +18,10 @@ int g_pid;
 char g_pid_s[MAX_LL_SIZE];
 
 int now_pid;
+char *now_name;
 
 codeset_t codeset;
+
 int is_script;
 int is_child;
 
@@ -37,6 +40,10 @@ da_variable tmp_env;
 da_alias alias;
 da_job job;
 
+
+jobmsg_t jobmsg[JOB_MSG_SIZE];
+size_t jobmsgsiz;
+
 char pathbuf[PATH_BUF_SIZE];
 char echobuf[ECHO_BUF_SIZE];
 size_t echobufsiz;
@@ -45,11 +52,11 @@ size_t echobufsiz;
 void insert(const char *c,unsigned len);
 void clean_show(size_t tpos);
 void to_pos(size_t tpos);
+inline static void deal_job_status(job_t *job,int status);
 
 int deal_keys(unsigned char c);
 
-#ifdef BASIC_INPUT
-int input(unsigned umask){
+int input_basic(void){
     int c=0;
     while(1){
         c=getc(stdin);
@@ -69,8 +76,10 @@ int input(unsigned umask){
     }
     return -1;
 }
-#else
 int input(unsigned umask){
+    if(is_script){
+        return input_basic();
+    }
     int ret=0;
     char c;
     char buf[8];
@@ -82,10 +91,11 @@ int input(unsigned umask){
 
     while(1){
         ret=read(STDIN_FILENO,&c,1);
+        if(ret==-1){
+            continue;
+        }
         if(c==0x04||ret==0){
             if(!is_script){
-                // echo_to_buf("\nexit\n",6);
-                // echo_buf_to_stdout();
                 return -1;
             }
             return 2;
@@ -94,7 +104,7 @@ int input(unsigned umask){
         if(c=='\n'){
             if(!is_script){
                 echo_to_buf("\n",1);
-                echo_buf_to_stdout();
+                echo_buf_to_fd(STDOUT_FILENO);
             }
             if(!now_is_bufffer){
                 free(history.arr[history.size-1]);
@@ -114,7 +124,7 @@ int input(unsigned umask){
     }
     return 0;
 }
-#endif
+
 
 #define STD_RET(v) \
     ((unsigned)(v)>127?(127):(v))
@@ -159,16 +169,19 @@ int deal_keys(unsigned char c){
 }
 
 
-size_t next_char(const char *str,size_t pos){
+size_t next_char(const char *str,size_t pos,size_t size){
+    if(pos>=size){
+        return pos;
+    }
     switch(codeset){
     case C:
         break;
     case UTF8:
-        if(UTF8_CHECK(str[pos],2)){
+        if(UTF8_CHECK(str[pos],2)&&pos+2<size){
             return pos+2;
-        }else if(UTF8_CHECK(str[pos],3)){
+        }else if(UTF8_CHECK(str[pos],3)&&pos+3<size){
             return pos+3;
-        }else if(UTF8_CHECK(str[pos],4)){
+        }else if(UTF8_CHECK(str[pos],4)&&pos+4<size){
             return pos+4;
         }
         break;
@@ -177,12 +190,15 @@ size_t next_char(const char *str,size_t pos){
 }
 
 size_t last_char(const char *str,size_t pos){
+    if(!pos){
+        return 0;
+    }
     switch(codeset){
     case C:
         break;
     case UTF8:
         pos--;
-        while(UTF8_CHECK(str[pos],1)){
+        while(pos&&UTF8_CHECK(str[pos],1)){
             pos--;
         }
         return pos;
@@ -229,7 +245,7 @@ void insert(const char *c,unsigned len){
     output(buffer.arr+pos,buffer.size-pos);
     size_t dpos=pos;
     while(i<len){
-        dpos=next_char(buffer.arr,dpos);
+        dpos=next_char(buffer.arr,dpos,buffer.size);
         i+=get_char_len(c[i]);
     }
     pos=buffer.size;
@@ -242,7 +258,7 @@ void clean_show(size_t tpos){
     while(dpos<buffer.size){
         width=get_char_width(&buffer.arr[dpos]);
         echo_to_buf("  ",width);
-        dpos=next_char(buffer.arr,dpos);
+        dpos=next_char(buffer.arr,dpos,buffer.size);
         cnt+=width;
     }
     while(cnt){
@@ -261,7 +277,7 @@ void clean_show(size_t tpos){
         }
         pos=tpos;
     }
-    echo_buf_to_stdout();
+    echo_buf_to_fd(STDOUT_FILENO);
 
 }
 
@@ -269,7 +285,7 @@ void to_pos(size_t tpos){
     size_t dpos=pos;
     if(tpos>pos){
         while(dpos<tpos){
-            dpos=next_char(buffer.arr,dpos);
+            dpos=next_char(buffer.arr,dpos,buffer.size);
             echo_to_buf("\033[C\033[C",3*get_char_width(&buffer.arr[dpos]));
         }
     }else if(tpos<pos){
@@ -279,7 +295,7 @@ void to_pos(size_t tpos){
         }
     }
     pos=dpos;
-    echo_buf_to_stdout();
+    echo_buf_to_fd(STDOUT_FILENO);
 }
 
 void echo_unsigned_to_buf(size_t num){
@@ -297,10 +313,10 @@ void echo_to_buf(const char *str,size_t size){
     }
 
     if(size>ECHO_BUF_SIZE){
-        echo_buf_to_stdout();
+        echo_buf_to_fd(STDOUT_FILENO);
         write(STDOUT_FILENO,str,size);
     }else if(echobufsiz+size>=ECHO_BUF_SIZE){
-        echo_buf_to_stdout();
+        echo_buf_to_fd(STDOUT_FILENO);
         memcpy(echobuf,str,size);
         echobufsiz+=size;
     }else{
@@ -309,7 +325,7 @@ void echo_to_buf(const char *str,size_t size){
     }
 }
 
-void echo_buf_to_stdout(void){
+void echo_buf_to_fd(int fd){
     if(!echo){
         return ;
     }
@@ -341,7 +357,7 @@ int delete(void){
         return 0;
     }
 
-    size_t dpos=next_char(buffer.arr,pos);
+    size_t dpos=next_char(buffer.arr,pos,buffer.size);
     if(pos==buffer.size-1){
         clean_show(pos);
         for(int i=0;i<dpos-pos;i++){
@@ -379,7 +395,7 @@ int right(void){
     if(pos>=buffer.size){
         return 0;
     }
-    size_t dpos=next_char(buffer.arr,pos);
+    size_t dpos=next_char(buffer.arr,pos,buffer.size);
     output("\033[C\033[C",3*get_char_width(&buffer.arr[pos]));
     pos=dpos;
     return 0;
@@ -410,7 +426,7 @@ int last_word(void){
         dpos=last_char(buffer.arr,dpos);
     }
     if(!IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos);
+        dpos=next_char(buffer.arr,dpos,buffer.size);
     }
     to_pos(dpos);
     return 0;
@@ -424,11 +440,11 @@ int next_word(void){
     size_t dpos=pos;
     if(!legal){
         while(dpos<buffer.size&&!IS_LEGAL(buffer.arr[dpos])){
-            dpos=next_char(buffer.arr,dpos);
+            dpos=next_char(buffer.arr,dpos,buffer.size);
         }
     }
     while(dpos<buffer.size&&IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos);
+        dpos=next_char(buffer.arr,dpos,buffer.size);
     }
     to_pos(dpos);
     return 0;
@@ -463,7 +479,7 @@ int clear_last_word(void){
         dpos=last_char(buffer.arr,dpos);
     }
     if(!IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos);
+        dpos=next_char(buffer.arr,dpos,buffer.size);
     }
     size_t opos=pos;
     to_pos(dpos);
@@ -564,6 +580,8 @@ const char *get_var(const char *var){
         }else if(var[0]=='?'){
             cmd_unsigned_to_str(g_ret_s,MAX_LL_SIZE-1,g_ret);
             return g_ret_s;
+        }else if(var[0]=='$'){
+            return g_pid_s;
         }
     }
     variable_t *v=find_var(var);
@@ -760,11 +778,14 @@ int unset_alias(const char *als){
     return 0;
 }
 
-char *restore_cmd(da_command *cmds){
+char *restore_cmd(command_t *cmds,size_t size){
     da_str tmp;
     da_init(&tmp);
-    for(size_t i=0;i<cmds->size;i++){
-        command_t *now=&cmds->arr[i];
+
+    int ret_flg=0;
+
+    for(size_t i=0;i<size;i++){
+        command_t *now=&cmds[i];
         size_t j=0;
         while(j<now->cmdlen&&now->cmds[j]){
             size_t len=strlen(now->cmds+j);
@@ -790,7 +811,10 @@ char *restore_cmd(da_command *cmds){
         j=0;
         while(j<now->cmdlen&&now->cmds[j]){
             size_t len=strlen(now->cmds+j);
-            if(is_variable(now->cmds+j)||(now->cmds[j]=='|'&&now->cmds[j+1]=='e')){
+            if(is_variable(now->cmds+j)||((now->cmds[j]=='|'||now->cmds[j]=='&')&&now->cmds[j+1]=='e')){
+                if(now->cmds[j]=='&'&&now->cmds[j+1]=='e'){
+                    ret_flg=1;
+                }
                 j+=len+1;
                 continue;
             }
@@ -806,30 +830,212 @@ char *restore_cmd(da_command *cmds){
             da_add(sizeof(char),&tmp," ");
             j+=len+1;
         }
+
+        if(ret_flg){
+            break;
+        }
     }
     da_add(sizeof(char),&tmp,"");
     return tmp.arr;
 }
 
-int add_job(char *name,int pid){
+int add_job(char *name,int pid,int stat){
+    size_t num=job.size?job.arr[job.size-1].num+1:1;
+    job_t j={.name=name,.pid=pid,.stat=stat,.num=num};
+    da_add(sizeof(job_t),&job,&j);
+
+    return job.size-1;
+}
+size_t find_job_pid(int pid){
+    if(pid<=0){
+        return -1;
+    }
     for(size_t i=0;i<job.size;i++){
-        if(!job.arr[i].name){
-            job.arr[i].name=name;
-            job.arr[i].pid=pid;
-            return i+1;
+        if(job.arr[i].pid==pid){
+            return i;
         }
     }
-    job_t j={.name=name,.pid=pid};
-    da_add(sizeof(job_t),&job,&j);
-    return job.size;
+    return -1;
 }
-int kill_job(int num){
-    return 0;
+size_t find_job_num(size_t num){
+    if(num<=0){
+        return -1;
+    }
+    for(size_t i=0;i<job.size;i++){
+        if(job.arr[i].num==num){
+            return i;
+        }
+    }
+    return -1;
 }
-int kill_job_pid(int pid){
+size_t get_job_num(const char *str){
+    if(!job.size){
+        return -1;
+    }
+    unsigned num=0;
+    if(str[0]!='%'){
+        return -1;
+    }
+    if(str[1]=='+'){
+        num=job.size-1;
+    }else if(str[1]=='-'){
+        if(job.size>1){
+            num=job.arr[job.size-2].num;
+        }else{
+            num=job.arr[job.size-1].num;
+        }
+    }else{
+        num=cmd_str_to_unsigned(str+1,strlen(str+1));
+    }
+    if(num==(unsigned)-1){
+        return -1;
+    }
+    return num;
+}
+int del_job_pid(int pid){
+    if(pid<=0){
+        return 127;
+    }
+    size_t i=0;
+    for(i=0;i<job.size;i++){
+        if(job.arr[i].pid==pid){
+            break;
+        }
+    }
+    if(i==job.size){
+        return 127;
+    }
+    free(job.arr[i].name);
+    if(i<job.size-1){
+        memmove(job.arr+i,job.arr+i+1,sizeof(job_t));
+    }
+    da_pop(sizeof(job_t),&job);
     return 0;
 }
 
+int deal_jobmsg(void){
+    size_t i=0;
+    while(i<job.size){
+        if(job.arr[i].stat==JOB_OUT_STOPPED){
+            struct sigaction sa;
+            sa.sa_handler=SIG_IGN;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags=SA_RESTART;
+            sigaction(SIGTTOU,&sa,NULL);
+
+            tcsetpgrp(STDIN_FILENO,job.arr[i].pid);
+            now_pid=job.arr[i].pid;
+            kill(job.arr[i].pid,SIGCONT);
+            int status=0;
+            size_t j=0;
+            while(j<MAX_JOB_OUT_TIMES&&waitpid(job.arr[i].pid,&status,WUNTRACED|WNOHANG)<=0){
+                usleep(50);
+                j++;
+            }
+
+            tcsetpgrp(STDIN_FILENO,getpgrp());
+            if(status){
+                deal_job_status(&job.arr[i],status);
+            }
+            for(size_t j=0;j<jobmsgsiz;j++){
+                if(jobmsg[j].stat==JOB_OUT_STOPPED&&jobmsg[j].pid==job.arr[i].pid){
+                    jobmsg[j].pid=0;
+                }
+            }
+            now_pid=0;
+            sa.sa_handler=SIG_DFL;
+            sigaction(SIGTTOU,&sa,NULL);
+        }
+        i++;
+    }
+    for(size_t i=0;i<jobmsgsiz;i++){
+        if(jobmsg[i].pid==0){
+            continue;
+        }
+        size_t k=find_job_pid(jobmsg[i].pid);
+        echo_to_buf("[",1);
+        echo_unsigned_to_buf(job.arr[k].num);
+        echo_to_buf("]",1);
+
+        switch(jobmsg[i].stat){
+        case JOB_RUNNING:
+            echo_to_buf(" ",1);
+            echo_unsigned_to_buf(job.arr[k].pid);
+            break;
+        case JOB_FINISHED:
+            if(k==job.size-1){
+                echo_to_buf("+",1);
+            }else if(job.size>1&&k==job.size-2){
+                echo_to_buf("-",1);
+            }else{
+                echo_to_buf(" ",1);
+            }
+            echo_to_buf(" ",1);
+            echo_to_buf("Done\t\t\t",7);
+            echo_to_buf(job.arr[k].name,strlen(job.arr[k].name));
+
+            free(job.arr[k].name);
+            if(k<job.size-1){
+                memmove(job.arr+k,job.arr+k+1,sizeof(job_t));
+            }
+            da_pop(sizeof(job_t),&job);
+            break;
+        case JOB_STOPPED:
+        case JOB_IN_STOPPED:
+        case JOB_OUT_STOPPED:
+            if(k==job.size-1){
+                echo_to_buf("+",1);
+            }else if(job.size>1&&k==job.size-2){
+                echo_to_buf("-",1);
+            }else{
+                echo_to_buf(" ",1);
+            }
+            echo_to_buf(" ",1);
+            echo_to_buf("Stopped",7);
+            if(jobmsg[i].stat==JOB_IN_STOPPED){
+                echo_to_buf(" (tty input)\t\t",14);
+            }else if(jobmsg[i].stat==JOB_OUT_STOPPED){
+                echo_to_buf(" (tty output)\t\t",15);
+            }else{
+                echo_to_buf("\t\t\t",3);
+            }
+            echo_to_buf(job.arr[k].name,strlen(job.arr[k].name));
+            break;
+        }
+
+        echo_to_buf("\n",1);
+        echo_buf_to_fd(STDERR_FILENO);
+    }
+    jobmsgsiz=0;
+
+    return 0;
+}
+
+inline static void deal_job_status(job_t *job,int status){
+    if(WIFSTOPPED(status)){
+        if(WSTOPSIG(status)==SIGTTOU){
+            if(job->stat==JOB_OUT_STOPPED){
+                return ;
+            }
+            job->stat=JOB_OUT_STOPPED;
+        }else if(WSTOPSIG(status)==SIGTTIN){
+            job->stat=JOB_IN_STOPPED;
+        }else{
+            job->stat=JOB_STOPPED;
+        }
+        if(jobmsgsiz<JOB_MSG_SIZE){
+            jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=job->pid,.stat=job->stat};
+        }
+        return ;
+    }
+    if(WIFEXITED(status)){
+        g_ret=WEXITSTATUS(status);
+        job->stat=JOB_FINISHED;
+        if(jobmsgsiz<JOB_MSG_SIZE){
+            jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=job->pid,.stat=JOB_FINISHED};
+        }
+    }
+}
 
 void sig_int_handler(int sig){
     if(now_pid<0){
@@ -839,10 +1045,77 @@ void sig_int_handler(int sig){
     }
     kill(now_pid,SIGINT);
     output("\n",1);
+    now_pid=0;
+    if(is_child){
+        exit(127);
+    }
 }
 void sig_chld_handler(int sig){
+    int status=0;
+    for(size_t i=0;i<job.size;i++){
+        if(job.arr[i].pid==now_pid){
+            continue;
+        }
+        if(waitpid(job.arr[i].pid,&status,WNOHANG|WUNTRACED)<=0){
+            continue;
+        }
+        deal_job_status(&job.arr[i],status);
+    }
 }
 void sig_tstp_handler(int sig){
+    if(now_pid<=0&&!is_child){
+        return ;
+    }
+    if(is_child){
+        if(now_pid>0){
+            kill(now_pid,SIGSTOP);
+        }
+        raise(SIGSTOP);
+        return ;
+    }
+    size_t i=find_job_pid(now_pid);
+    if(i!=(size_t)-1){
+        kill(now_pid,SIGTSTP);
+        return ;
+    }
+    kill(now_pid,SIGSTOP);
+    int pipes[2];
+    char tmp[]="1";
+    pipe(pipes);
+    int pid=fork();
+    if(!pid){
+        setpgid(0,0);
+        is_child=1;
+        write(pipes[1],tmp,1);
+        close(pipes[0]);
+        close(pipes[1]);
+        return ;
+    }
+    is_child=0;
+    setpgid(pid,pid);
+    add_job(now_name,pid,JOB_STOPPED);
+    if(jobmsgsiz<JOB_MSG_SIZE){
+        jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=pid,.stat=JOB_RUNNING};
+    }
+    read(pipes[0],tmp,1);
+    close(pipes[0]);
+    close(pipes[1]);
+    kill(pid,SIGSTOP);
+    now_pid=0;
+}
+void sig_cont_handler(int sig){
+    if(now_pid<=0){
+        return ;
+    }
+    kill(now_pid,SIGCONT);
+    if(is_child){
+        return ;
+    }
+    for(size_t i=0;i<job.size;i++){
+        if(job.arr[i].stat==JOB_RUNNING){
+            kill(job.arr[i].pid,SIGCONT);
+        }
+    }
 }
 
 
@@ -899,7 +1172,7 @@ unsigned cmd_str_to_unsigned(const char *str,unsigned long size){
             break;
         }
         r*=10;
-        r+=str[i]+'0';
+        r+=str[i]-'0';
         i++;
     }
     return r;
@@ -1022,11 +1295,6 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
 }
 
 
-#ifdef BASIC_INPUT
-int set_terminal_echo(int enable){
-    return 0;
-}
-#else
 int set_terminal_echo(int enable){
     if(is_script||is_child){
         return 0;
@@ -1047,6 +1315,7 @@ int set_terminal_echo(int enable){
 
     if(!enable){
         new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
+        new_termios.c_lflag|=TOSTOP;
         new_termios.c_cc[VMIN]=1;
         new_termios.c_cc[VTIME]=0;
     }
@@ -1057,7 +1326,43 @@ int set_terminal_echo(int enable){
 
     return 0;
 }
-#endif
+
+void set_signal_handler(int enable){
+    if(is_script){
+        return ;
+    }
+    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags=0;
+
+    if(enable){
+        sa.sa_handler=SIG_DFL;
+        sigaction(SIGINT,&sa,NULL);
+        sigaction(SIGCHLD,&sa,NULL);
+        sigaction(SIGTSTP,&sa,NULL);
+        sigaction(SIGCONT,&sa,NULL);
+        // sigaction(SIGTTOU,&sa,NULL);
+        return ;
+    }
+
+    sa.sa_flags=SA_RESTART;
+
+    sa.sa_handler=sig_int_handler;
+    sigaction(SIGINT,&sa,NULL);
+
+    sa.sa_handler=sig_chld_handler;
+    sigaction(SIGCHLD,&sa,NULL);
+
+    sa.sa_handler=sig_tstp_handler;
+    sigaction(SIGTSTP,&sa,NULL);
+
+    sa.sa_handler=sig_cont_handler;
+    sigaction(SIGCONT,&sa,NULL);
+
+    // sa.sa_handler=sig_ttou_hangler;
+    // sigaction(SIGTTOU,&sa,NULL);
+}
+
 
 int sh_cd(char *const *argv){
     int r=1;
@@ -1224,12 +1529,113 @@ int sh_echo(char *const *argv){
 }
 
 int sh_jobs(char *const *argv){
+    size_t last_num=0;
+    size_t i=0;
+    for(size_t j=0;j<job.size;j++){
+        i=(size_t)-1;
+        for(size_t k=0;k<job.size;k++){
+            if(last_num<job.arr[k].num&&(i==(size_t)-1||job.arr[k].num<job.arr[i].num)){
+                i=k;
+            }
+        }
+        last_num=job.arr[i].num;
+        echo_to_buf("[",1);
+        echo_unsigned_to_buf(job.arr[i].num);
+        echo_to_buf("]",1);
+        if(i==job.size-1){
+            echo_to_buf("+  ",3);
+        }else if(job.size>1&&i==job.size-2){
+            echo_to_buf("-  ",3);
+        }else{
+            echo_to_buf("   ",3);
+        }
+        if(job.arr[i].stat==JOB_RUNNING){
+            echo_to_buf("Running\t\t\t",10);
+        }else if(job.arr[i].stat==JOB_STOPPED){
+            echo_to_buf("Stopped\t\t\t",10);
+        }else if(job.arr[i].stat==JOB_IN_STOPPED){
+            echo_to_buf("Stopped (tty input)\t\t\t",22);
+        }else if(job.arr[i].stat==JOB_OUT_STOPPED){
+            echo_to_buf("Stopped (tty output)\t\t\t",23);
+        }
+        echo_to_buf(job.arr[i].name,strlen(job.arr[i].name));
+        echo_to_buf("\n",1);
+        echo_buf_to_fd(STDOUT_FILENO);
+    }
     return 0;
 }
 int sh_fg(char *const *argv){
+    size_t num=0;
+    if(!job.size){
+        return 127;
+    }
+    if(!argv[1]){
+        num=job.arr[job.size-1].num;
+    }else{
+        num=get_job_num(argv[1]);
+        if(num==(size_t)-1){
+            return 127;
+        }
+    }
+
+    size_t i=find_job_num(num);
+    if(i==(size_t)-1){
+        return 127;
+    }
+    job_t j=job.arr[i];
+    if(i<job.size-1){
+        memmove(job.arr+i,job.arr+i+1,sizeof(job_t));
+    }
+    da_pop(sizeof(job_t),&job);
+    now_pid=j.pid;
+
+    struct sigaction sa;
+    sa.sa_handler=SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags=SA_RESTART;
+    sigaction(SIGTTOU,&sa,NULL);
+
+    tcsetpgrp(STDIN_FILENO,j.pid);
+    kill(j.pid,SIGCONT);
+    int status;
+    waitpid(j.pid,&status,WUNTRACED);
+
+    tcsetpgrp(STDIN_FILENO,getpgrp());
+
+    deal_job_status(&j,status);
+
+    sa.sa_handler=SIG_DFL;
+    sigaction(SIGTTOU,&sa,NULL);
+    da_add(sizeof(job_t),&job,&j);
     return 0;
 }
 int sh_bg(char *const *argv){
+    size_t num=0;
+    if(!job.size){
+        return 127;
+    }
+    if(!argv[1]){
+        num=job.arr[job.size-1].num;
+    }
+
+    size_t k=1;
+    while(argv[k]){
+        num=get_job_num(argv[1]);
+        if(num==(size_t)-1){
+            return 127;
+        }
+
+        size_t i=find_job_num(num);
+        if(i==(size_t)-1){
+            return 127;
+        }
+        job_t *j=&job.arr[i];
+
+        kill(j->pid,SIGCONT);
+        j->stat=JOB_RUNNING;
+
+        k++;
+    }
     return 0;
 }
 int sh_wait(char *const *argv){

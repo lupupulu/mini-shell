@@ -44,11 +44,13 @@ extern int g_pid;
 extern char g_pid_s[MAX_LL_SIZE];
 
 extern int now_pid;
+extern char *now_name;
 
 extern int is_script;
 extern int is_child;
 
 int set_terminal_echo(int enable);
+void set_signal_handler(int enable);
 
 typedef struct {
     char **argv;
@@ -58,7 +60,7 @@ typedef struct {
 }command_t;
 typedef darray_t(command_t) da_command;
 
-size_t next_char(const char *str,size_t pos);
+size_t next_char(const char *str,size_t pos,size_t size);
 size_t last_char(const char *str,size_t pos);
 size_t get_char_width(const char *c);
 size_t get_char_len(char c);
@@ -68,7 +70,7 @@ size_t utf8_get_char_width(const char *c);
 #define ECHO_BUF_SIZE 256
 void echo_unsigned_to_buf(size_t num);
 void echo_to_buf(const char *str,size_t size);
-void echo_buf_to_stdout(void);
+void echo_buf_to_fd(int fd);
 
 unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num);
 unsigned cmd_str_to_unsigned(const char *str,unsigned long size);
@@ -100,6 +102,7 @@ extern size_t history_pos;
 
 #define IN_ECHO        0b01
 #define IN_HANDLE_CHAR 0b10
+int input_basic(void);
 int input(unsigned umask);
 
 #define REDIR_IN              1
@@ -176,20 +179,42 @@ const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);
 
+#define JOB_RUNNING     0
+#define JOB_STOPPED     1
+#define JOB_OUT_STOPPED 2
+#define JOB_IN_STOPPED  3
+#define JOB_FINISHED    4
 typedef struct {
     char *name;
+    size_t num;
     int pid;
+    int stat;
 }job_t;
 typedef darray_t(job_t) da_job;
 extern da_job job;
-char *restore_cmd(da_command *cmds);
-int add_job(char *name,int pid);
-int kill_job(int num);
-int kill_job_pid(int pid);
+char *restore_cmd(command_t *cmds,size_t size);
+int add_job(char *name,int pid,int stat);
+size_t find_job_pid(int pid);
+size_t find_job_num(size_t num);
+size_t get_job_num(const char *str);
+int del_job_pid(int pid);
+
+typedef struct {
+    int pid;
+    int stat;
+}jobmsg_t;
+#define JOB_MSG_SIZE 64
+extern jobmsg_t jobmsg[JOB_MSG_SIZE];
+extern size_t jobmsgsiz;
+
+#define MAX_JOB_OUT_TIMES 4
+int deal_jobmsg(void);
 
 void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
 void sig_tstp_handler(int sig);
+void sig_cont_handler(int sig);
+void sig_ttou_hangler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];

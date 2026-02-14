@@ -5,10 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#define __USE_POSIX
 #include <signal.h>
 
-
-void set_signal_handler(int flg);
 
 int execute_command_parent(command_t *cmd);
 int execute_command_child(command_t *cmd);
@@ -17,16 +16,20 @@ int execute_command_child(command_t *cmd);
 #define EXE_PARENT 0b0010
 #define EXE_CLEAR  0b0100
 
-#define EXE_PIPE       0b000001
-#define EXE_WRONG_FILE 0b000010
-#define EXE_WRONG_PIPE 0b000100
-#define EXE_AND        0b001000
-#define EXE_OR         0b010000
+#define EXE_PIPE       0b00000001
+#define EXE_WRONG_FILE 0b00000010
+#define EXE_WRONG_PIPE 0b00000100
+#define EXE_AND        0b00001000
+#define EXE_OR         0b00010000
+#define EXE_ADD_BG     0b00100000
+#define EXE_DEL_BG     0b01000000
 
 int exe_parse_redirector(int st,int redir,int a,const char *file);
 int exe_parse_pipe(const char *cmd,int st,int *pipes,int *prev_pipe);
 int exe_parse_cmd(command_t *cmd,int st);
 
+int exe_bg_start(command_t *cmd);
+int exe_bg_end(command_t *cmd);
 
 
 int cm_init(command_t *cm);
@@ -50,6 +53,8 @@ char parse_home(da_str *buf,const char *str,size_t *inter);
 int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter);
 int parse_command(command_t *now,const char *str,size_t *inter,int flg);
 int parse_buffer(void);
+
+int execute_command(da_command *p,size_t i);
 
 int main(int argc,char *const *argv,char *const *envi){
     char *tmp=NULL;
@@ -92,21 +97,30 @@ int main(int argc,char *const *argv,char *const *envi){
         cmd_unsigned_to_str(g_argc_s,MAX_LL_SIZE-1,0);
         g_argv=argv;
     }
-    if(set_terminal_echo(0)){
+    if(!isatty(STDIN_FILENO)||!isatty(STDOUT_FILENO)||!isatty(STDERR_FILENO)){
         is_script=1;
     }
+    set_terminal_echo(0);
     set_signal_handler(0);
+
+    setpgid(0,0);
 
     g_pid=getpid();
     cmd_unsigned_to_str(g_pid_s,MAX_LL_SIZE-1,g_pid);
 
-    set_var("PS1=$ ",0);
-    set_var("PS2=> ",0);
-    set_var("PS4=+ ",0);
-
+    if(!is_script){
+        set_var("PS1=$ ",0);
+        set_var("PS2=> ",0);
+        set_var("PS4=+ ",0);
+        tcsetpgrp(STDIN_FILENO,getpgrp());
+    }
     const char *psn="PS1";
 
+
+
     while(1){
+        deal_jobmsg();
+
         const char *ps=NULL;
         if(!is_script){
             ps=get_var(psn);
@@ -114,6 +128,10 @@ int main(int argc,char *const *argv,char *const *envi){
         }
         da_init(&buffer);
         int r=input(input_mod);
+
+        deal_jobmsg();
+
+
         switch(r){
         case 127:
             return 127;
@@ -125,6 +143,7 @@ int main(int argc,char *const *argv,char *const *envi){
         case 2:
         case 0:
             int ret=parse_buffer();
+            deal_jobmsg();
             if(ret==1){
                 psn="PS2";
             }else{
@@ -539,54 +558,134 @@ int parse_buffer(void){
             da_add(sizeof(char*),&history,&tmp_buffer);
             return 1;
         }
+        da_add(sizeof(command_t),&commands,&cmd);
         if(ret&PARSE_IS_BACKGROUND){
             cm_add_cmd(&commands.arr[last_bg_loc],"& ");
             last_bg_loc=j+1;
         }
-        da_add(sizeof(command_t),&commands,&cmd);
         cm_init(&cmd);
         j++;
     }
 
     da_add(sizeof(char*),&history,&tmp_buffer);
 
+    da_clear(&buffer);
+
     if(tmp_buffer_size){
         tmp_buffer=NULL;
         tmp_buffer_size=0;
     }
-    int need_exe=1;
 
+    set_terminal_echo(1);
+    now_name=restore_cmd(commands.arr,commands.size);
     for(size_t i=0;i<commands.size;i++){
         command_t *p=&commands.arr[i];
         if(p->argvn){
-            int ret=0;
-            if(need_exe){
-                ret=execute_command_parent(p);
-                g_ret=ret&0x7f;
-            }
-            int r1=ret>>8;
-            now_pid=0;
-            if(r1&EXE_AND&&g_ret){
-                need_exe=0;
-            }
-            if(r1&EXE_OR&&!g_ret){
-                need_exe=0;
-            }
-            for(size_t j=0;j<p->argvn;j++){
-                free(p->argv[j]);
-            }
+            execute_command(&commands,i);
+        }
+        for(size_t j=0;j<p->argvn;j++){
+            free(p->argv[j]);
         }
         cm_clear(&commands.arr[i]);
     }
+    free(now_name);
     da_fake_clear(&commands);
-
     if(is_child){
         exit(g_ret);
     }
+    set_terminal_echo(0);
 
     return 0;
 }
 
+int execute_command(da_command *cmds,size_t i){
+    static int in_bg,skip;
+    if(i==0){
+        in_bg=0;
+        skip=0;
+    }
+    command_t *p=&cmds->arr[i];
+    if(in_bg&&!is_child){
+        if(exe_bg_end(p)){
+            in_bg=0;
+        }
+        return 0;
+    }
+    if(!now_name){
+        now_name=restore_cmd(cmds->arr+i,cmds->size-i);
+    }
+    if(skip){
+        skip=0;
+        return 0;
+    }
+
+    if(exe_bg_start(p)){
+        int pipes[2];
+        char tmp[]="1";
+        pipe(pipes);
+        int pid=fork();
+        if(pid){
+            is_child=0;
+            add_job(now_name,pid,JOB_RUNNING);
+            if(jobmsgsiz<JOB_MSG_SIZE){
+                jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=pid,.stat=JOB_RUNNING};
+            }
+            now_name=NULL;
+            in_bg=!exe_bg_end(p);
+            setpgid(pid,pid);
+            read(pipes[0],tmp,1);
+            close(pipes[0]);
+            close(pipes[1]);
+            return 0;
+        }else{
+            setpgid(0,0);
+            is_child=1;
+            write(pipes[1],tmp,1);
+            close(pipes[0]);
+            close(pipes[1]);
+        }
+    }
+    int ret=0;
+    ret=execute_command_parent(p);
+    g_ret=ret&0x7f;
+    int r1=ret>>8;
+    now_pid=0;
+    if(r1&EXE_AND&&g_ret){
+        skip=1;
+    }
+    if(r1&EXE_OR&&!g_ret){
+        skip=1;
+    }
+    if(r1&EXE_ADD_BG){
+        in_bg=1;
+    }
+    if(r1&EXE_DEL_BG){
+        if(is_child){
+            exit(g_ret);
+        }else{
+            in_bg=0;
+        }
+    }
+    return 0;
+}
+
+
+int exe_bg_start(command_t *cmd){
+    if(cmd->cmdlen>2&&cmd->cmds[cmd->cmdlen-2]==' '&&cmd->cmds[cmd->cmdlen-3]=='&'){
+        return 1;
+    }
+    return 0;
+}
+int exe_bg_end(command_t *cmd){
+    size_t i=0;
+    while(i<cmd->cmdlen&&cmd->cmds[i]){
+        if(cmd->cmds[i]=='&'&&cmd->cmds[i+1]=='e'&&cmd->cmds[i+2]=='\0'){
+            return 1;
+        }
+        i+=strlen(cmd->cmds+i)+1;
+    }
+    return 0;
+}
 
 int exe_parse_redirector(int st,int redir,int a,const char *file){
     static darray_t(int) pips;
@@ -758,6 +857,8 @@ int exe_parse_cmd(command_t *cmd,int st){
             r|=exe_parse_redirector(st,redir,fd_a,cmd->cmds+i);
         }else if(st&EXE_START&&is_variable(cmd->cmds+i)){
             set_tmp_env(cmd->cmds+i);
+        }else if(!(st&EXE_START)&&cmd->cmds[i]=='&'&&cmd->cmds[i+1]=='e'){
+            r|=EXE_DEL_BG;
         }else if(cmd->cmds[i]=='|'&&cmd->cmds[i+1]=='|'){
             r|=EXE_OR;
         }else if(cmd->cmds[i]=='&'&&cmd->cmds[i+1]=='&'){
@@ -803,6 +904,7 @@ int execute_command_parent(command_t *cmd){
     int pid=fork();
     if(pid==0){
         exe_parse_cmd(cmd,EXE_START);
+        set_signal_handler(1);
         if(f){
             r2=f(cmd->argv);
         }else{
@@ -812,10 +914,25 @@ int execute_command_parent(command_t *cmd){
     }else if(pid>0){
         now_pid=pid;
 
-        int status;
-        wait(&status);
-        set_terminal_echo(0);
-        exe_parse_cmd(cmd,EXE_PARENT);
+        int status=0;
+        while(1){
+            if(waitpid(pid,&status,WUNTRACED)<0){
+                continue;
+            }
+            if(WIFEXITED(status)){
+                break;
+            }
+            if(!is_child){
+                exe_parse_cmd(cmd,EXE_PARENT);
+                r1|=EXE_ADD_BG;
+                now_name=NULL;
+                return g_ret|(r1<<8);
+            }
+        }
+        int r3=exe_parse_cmd(cmd,EXE_PARENT);
+        if(r3&EXE_DEL_BG){
+            exit(WIFEXITED(status)?127:WEXITSTATUS(status));
+        }
         if(!WIFEXITED(status)){
             return 127;
         }
@@ -868,17 +985,4 @@ int cm_clear(command_t *cm){
     free(cm->cmds);
     memset(cm,0,sizeof(command_t));
     return 0;
-}
-
-
-void set_signal_handler(int flg){
-    if(flg){
-        signal(SIGINT,SIG_DFL);
-        signal(SIGCHLD,SIG_DFL);
-        signal(SIGTSTP,SIG_DFL);
-        return ;
-    }
-    signal(SIGINT,sig_int_handler);
-    signal(SIGCHLD,sig_chld_handler);
-    signal(SIGTSTP,sig_tstp_handler);
 }
