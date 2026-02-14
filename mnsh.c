@@ -48,8 +48,7 @@ void to_pos(size_t tpos);
 
 int deal_keys(unsigned char c);
 
-#ifdef BASIC_INPUT
-int input(unsigned umask){
+int input_basic(void){
     int c=0;
     while(1){
         c=getc(stdin);
@@ -69,8 +68,10 @@ int input(unsigned umask){
     }
     return -1;
 }
-#else
 int input(unsigned umask){
+    if(is_script){
+        return input_basic();
+    }
     int ret=0;
     char c;
     char buf[8];
@@ -84,8 +85,6 @@ int input(unsigned umask){
         ret=read(STDIN_FILENO,&c,1);
         if(c==0x04||ret==0){
             if(!is_script){
-                // echo_to_buf("\nexit\n",6);
-                // echo_buf_to_stdout();
                 return -1;
             }
             return 2;
@@ -94,7 +93,7 @@ int input(unsigned umask){
         if(c=='\n'){
             if(!is_script){
                 echo_to_buf("\n",1);
-                echo_buf_to_stdout();
+                echo_buf_to_fd(STDOUT_FILENO);
             }
             if(!now_is_bufffer){
                 free(history.arr[history.size-1]);
@@ -114,7 +113,7 @@ int input(unsigned umask){
     }
     return 0;
 }
-#endif
+
 
 #define STD_RET(v) \
     ((unsigned)(v)>127?(127):(v))
@@ -261,7 +260,7 @@ void clean_show(size_t tpos){
         }
         pos=tpos;
     }
-    echo_buf_to_stdout();
+    echo_buf_to_fd(STDOUT_FILENO);
 
 }
 
@@ -279,7 +278,7 @@ void to_pos(size_t tpos){
         }
     }
     pos=dpos;
-    echo_buf_to_stdout();
+    echo_buf_to_fd(STDOUT_FILENO);
 }
 
 void echo_unsigned_to_buf(size_t num){
@@ -297,10 +296,10 @@ void echo_to_buf(const char *str,size_t size){
     }
 
     if(size>ECHO_BUF_SIZE){
-        echo_buf_to_stdout();
+        echo_buf_to_fd(STDOUT_FILENO);
         write(STDOUT_FILENO,str,size);
     }else if(echobufsiz+size>=ECHO_BUF_SIZE){
-        echo_buf_to_stdout();
+        echo_buf_to_fd(STDOUT_FILENO);
         memcpy(echobuf,str,size);
         echobufsiz+=size;
     }else{
@@ -309,7 +308,7 @@ void echo_to_buf(const char *str,size_t size){
     }
 }
 
-void echo_buf_to_stdout(void){
+void echo_buf_to_fd(int fd){
     if(!echo){
         return ;
     }
@@ -790,7 +789,7 @@ char *restore_cmd(da_command *cmds){
         j=0;
         while(j<now->cmdlen&&now->cmds[j]){
             size_t len=strlen(now->cmds+j);
-            if(is_variable(now->cmds+j)||(now->cmds[j]=='|'&&now->cmds[j+1]=='e')){
+            if(is_variable(now->cmds+j)||((now->cmds[j]=='|'||now->cmds[j]=='&')&&now->cmds[j+1]=='e')){
                 j+=len+1;
                 continue;
             }
@@ -812,21 +811,68 @@ char *restore_cmd(da_command *cmds){
 }
 
 int add_job(char *name,int pid){
-    for(size_t i=0;i<job.size;i++){
-        if(!job.arr[i].name){
-            job.arr[i].name=name;
-            job.arr[i].pid=pid;
-            return i+1;
+    size_t now=job.arr[0].num;//latest loc
+    size_t i=1;
+    while(i<job.size){
+        if(!job.arr[i].pid){
+            break;
         }
+        i++;
     }
-    job_t j={.name=name,.pid=pid};
-    da_add(sizeof(job_t),&job,&j);
+    job_t j={.name=name,.pid=pid,.stat=JOB_RUNNING,.num=job.arr[now].num+1,.next=0};
+    if(i==job.size){
+        da_add(sizeof(job_t),&job,&j);
+    }else{
+        memcpy(&job.arr[i],&j,sizeof(job_t));
+    }
+    job.arr[now].next=i;
+    job.arr[0].num=i;
+
+
+    echo_to_buf("[",1);
+    echo_unsigned_to_buf(j.num);
+    echo_to_buf("] ",2);
+    echo_unsigned_to_buf(pid);
+    echo_to_buf("\n",1);
+    echo_buf_to_fd(STDERR_FILENO);
+
     return job.size;
 }
-int kill_job(int num){
-    return 0;
+job_t *find_job_pid(int pid){
+    if(pid<=0){
+        return NULL;
+    }
+    for(size_t i=0;i<job.size;i++){
+        if(job.arr[i].pid==pid){
+            return &job.arr[i];
+        }
+    }
+    return NULL;
 }
-int kill_job_pid(int pid){
+int del_job_pid(int pid){
+    if(pid<=0){
+        return 127;
+    }
+    size_t now=job.arr[0].next;
+    if(!now){
+        return 0;
+    }
+    while(job.arr[now].next){
+        if(job.arr[job.arr[now].next].pid==pid){
+            break;
+        }
+        now=job.arr[now].next;
+    }
+    if(now==job.arr[0].next){
+        free(job.arr[now].name);
+        memset(&job.arr[now],0,sizeof(job_t));
+        job.arr[0].next=0;
+        job.arr[0].num=0;
+        return 0;
+    }
+    free(job.arr[job.arr[now].next].name);
+    memset(&job.arr[job.arr[now].next],0,sizeof(job_t));
+    job.arr[now].next=job.arr[job.arr[now].next].next;
     return 0;
 }
 
@@ -841,6 +887,15 @@ void sig_int_handler(int sig){
     output("\n",1);
 }
 void sig_chld_handler(int sig){
+    pid_t pid;
+    int status;
+    while((pid=waitpid(-1,&status,WNOHANG))>0){
+        del_job_pid(pid);
+    }
+    while((pid=waitpid(-1,&status,WNOHANG|WUNTRACED))>0){
+        job_t *f=find_job_pid(pid);
+        f->stat=JOB_STOPPED;
+    }
 }
 void sig_tstp_handler(int sig){
 }
@@ -1022,11 +1077,6 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
 }
 
 
-#ifdef BASIC_INPUT
-int set_terminal_echo(int enable){
-    return 0;
-}
-#else
 int set_terminal_echo(int enable){
     if(is_script||is_child){
         return 0;
@@ -1057,7 +1107,22 @@ int set_terminal_echo(int enable){
 
     return 0;
 }
-#endif
+
+void set_signal_handler(int enable){
+    if(is_script){
+        return ;
+    }
+    if(enable){
+        signal(SIGINT,SIG_DFL);
+        signal(SIGCHLD,SIG_DFL);
+        signal(SIGTSTP,SIG_DFL);
+        return ;
+    }
+    signal(SIGINT,sig_int_handler);
+    signal(SIGCHLD,sig_chld_handler);
+    signal(SIGTSTP,sig_tstp_handler);
+}
+
 
 int sh_cd(char *const *argv){
     int r=1;
@@ -1224,6 +1289,22 @@ int sh_echo(char *const *argv){
 }
 
 int sh_jobs(char *const *argv){
+    size_t now=job.arr[0].next;
+    while(now){
+        echo_to_buf("[",1);
+        echo_unsigned_to_buf(job.arr[now].num);
+        echo_to_buf("]  ",3);
+        if(job.arr[now].stat==JOB_RUNNING){
+            echo_to_buf("Running\t\t\t",10);
+        }else if(job.arr[now].stat==JOB_STOPPED){
+            echo_to_buf("Stopped\t\t\t",10);
+        }
+        echo_to_buf(job.arr[now].name,strlen(job.arr[now].name));
+        echo_to_buf("\n",1);
+        echo_buf_to_fd(STDOUT_FILENO);
+
+        now=job.arr[now].next;
+    }
     return 0;
 }
 int sh_fg(char *const *argv){

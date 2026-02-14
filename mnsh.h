@@ -49,6 +49,7 @@ extern int is_script;
 extern int is_child;
 
 int set_terminal_echo(int enable);
+void set_signal_handler(int enable);
 
 typedef struct {
     char **argv;
@@ -68,7 +69,7 @@ size_t utf8_get_char_width(const char *c);
 #define ECHO_BUF_SIZE 256
 void echo_unsigned_to_buf(size_t num);
 void echo_to_buf(const char *str,size_t size);
-void echo_buf_to_stdout(void);
+void echo_buf_to_fd(int fd);
 
 unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num);
 unsigned cmd_str_to_unsigned(const char *str,unsigned long size);
@@ -100,6 +101,7 @@ extern size_t history_pos;
 
 #define IN_ECHO        0b01
 #define IN_HANDLE_CHAR 0b10
+int input_basic(void);
 int input(unsigned umask);
 
 #define REDIR_IN              1
@@ -176,16 +178,21 @@ const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);
 
+#define JOB_RUNNING 0
+#define JOB_STOPPED 1
 typedef struct {
     char *name;
     int pid;
+    int stat;
+    int num;
+    int next;
 }job_t;
 typedef darray_t(job_t) da_job;
 extern da_job job;
 char *restore_cmd(da_command *cmds);
 int add_job(char *name,int pid);
-int kill_job(int num);
-int kill_job_pid(int pid);
+job_t *find_job_pid(int pid);
+int del_job_pid(int pid);
 
 void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
