@@ -21,8 +21,10 @@ int now_pid;
 char *now_name;
 
 codeset_t codeset;
+
 int is_script;
 int is_child;
+int sig_stop_ign;
 
 int now_is_bufffer=1;
 int echo=1;
@@ -909,23 +911,26 @@ void sig_chld_handler(int sig){
     int status;
     while((pid=waitpid(-1,&status,WNOHANG|WUNTRACED))>0){
         if(WIFSTOPPED(status)){
+            if(sig_stop_ign==pid){
+                sig_stop_ign=0;
+                continue;
+            }
             job_t *j=find_job_pid(pid);
-            if(!j){
-                int pid=fork();
-                if(!pid){
-                    setpgid(0,0);
-                    is_child=1;
-                    return ;
-                }
-                setpgid(pid,pid);
-                add_job(now_name,pid,JOB_STOPPED);
-                now_name=NULL;
-            }else{
+            if(j){
                 j->stat=JOB_STOPPED;
+                continue;
             }
-            if(now_pid==pid){
-                now_pid=0;
+            int pid=fork();
+            if(!pid){
+                setpgid(0,0);
+                is_child=1;
+                raise(SIGSTOP);
+                return ;
             }
+            sig_stop_ign=pid;
+            setpgid(pid,pid);
+            add_job(now_name,pid,JOB_STOPPED);
+            now_name=NULL;
             continue;
         }
         g_ret=WEXITSTATUS(status);
@@ -934,15 +939,43 @@ void sig_chld_handler(int sig){
                 continue;
             }
             exitjobpid[exitjobpidsiz++]=pid;
+            // printf("%d\n",pid);
             break;
         }
     }
 }
 void sig_tstp_handler(int sig){
+    if(now_pid<=0&&!is_child){
+        return ;
+    }
+    if(is_child){
+        if(now_pid>0){
+            kill(now_pid,SIGSTOP);
+        }
+        raise(SIGSTOP);
+        return ;
+    }
+    output("\n",1);
+    job_t *j=find_job_pid(now_pid);
+    if(!j){
+        kill(now_pid,SIGSTOP);
+        return ;
+    }
+    kill(now_pid,SIGTSTP);
+}
+void sig_cont_handler(int sig){
     if(now_pid<=0){
         return ;
     }
-    kill(now_pid,SIGSTOP);
+    kill(now_pid,SIGCONT);
+    if(is_child){
+        return ;
+    }
+    for(size_t i=0;i<job.size;i++){
+        if(job.arr[i].stat==JOB_RUNNING){
+            kill(job.arr[i].pid,SIGCONT);
+        }
+    }
 }
 
 
@@ -1167,6 +1200,7 @@ void set_signal_handler(int enable){
         sigaction(SIGINT,&sa,NULL);
         sigaction(SIGCHLD,&sa,NULL);
         sigaction(SIGTSTP,&sa,NULL);
+        sigaction(SIGCONT,&sa,NULL);
         return ;
     }
 
@@ -1178,6 +1212,9 @@ void set_signal_handler(int enable){
 
     sa.sa_handler=sig_tstp_handler;
     sigaction(SIGTSTP,&sa,NULL);
+
+    sa.sa_handler=sig_cont_handler;
+    sigaction(SIGCONT,&sa,NULL);
 }
 
 
@@ -1346,6 +1383,11 @@ int sh_echo(char *const *argv){
 }
 
 int sh_jobs(char *const *argv){
+    for(size_t i=0;i<exitjobpidsiz;i++){
+        del_job_pid(exitjobpid[i]);
+    }
+    exitjobpidsiz=0;
+
     for(size_t i=0;i<job.size;i++){
         echo_to_buf("[",1);
         echo_unsigned_to_buf(job.arr[i].num);
@@ -1391,7 +1433,6 @@ int sh_fg(char *const *argv){
     killpg(j->pid,SIGCONT);
     int status;
     waitpid(j->pid,&status,WUNTRACED);
-    printf("%d\n",status);
 
     tcsetpgrp(STDIN_FILENO,getpgrp());
 

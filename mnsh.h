@@ -46,6 +46,8 @@ extern char g_pid_s[MAX_LL_SIZE];
 extern int now_pid;
 extern char *now_name;
 
+extern int sig_stop_ign;
+
 extern int is_script;
 extern int is_child;
 

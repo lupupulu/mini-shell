@@ -620,6 +620,7 @@ int execute_command(da_command *cmds,size_t i){
     if(exe_bg_start(p)){
         int pid=fork();
         if(pid){
+            sig_stop_ign=pid;
             is_child=0;
             int i=add_job(now_name,pid,JOB_RUNNING);
             now_name=NULL;
@@ -630,6 +631,7 @@ int execute_command(da_command *cmds,size_t i){
             waitpid(pid,&status,WUNTRACED);
             kill(pid,SIGCONT);
             job.arr[i].stat=JOB_RUNNING;
+            sig_stop_ign=0;
             return 0;
         }else{
             setpgid(0,0);
@@ -904,7 +906,15 @@ int execute_command_parent(command_t *cmd){
         now_pid=pid;
 
         int status=0;
-        waitpid(pid,&status,0);
+        while(waitpid(pid,&status,WUNTRACED)>0){
+            if(WIFEXITED(status)){
+                break;
+            }
+            if(!find_job_pid(pid)&&!is_child){
+                exe_parse_cmd(cmd,EXE_PARENT);
+                return g_ret;
+            }
+        }
         int r3=exe_parse_cmd(cmd,EXE_PARENT);
         if(r3&EXE_DEL_BG){
             exit(WIFEXITED(status)?127:WEXITSTATUS(status));
