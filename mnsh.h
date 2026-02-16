@@ -44,6 +44,7 @@ extern int g_pid;
 extern char g_pid_s[MAX_LL_SIZE];
 
 extern int now_pid;
+extern char *now_name;
 
 extern int is_script;
 extern int is_child;
@@ -59,7 +60,7 @@ typedef struct {
 }command_t;
 typedef darray_t(command_t) da_command;
 
-size_t next_char(const char *str,size_t pos);
+size_t next_char(const char *str,size_t pos,size_t size);
 size_t last_char(const char *str,size_t pos);
 size_t get_char_width(const char *c);
 size_t get_char_len(char c);
@@ -182,21 +183,25 @@ int unset_alias(const char *als);
 #define JOB_STOPPED 1
 typedef struct {
     char *name;
+    size_t num;
     int pid;
     int stat;
-    int num;
-    int next;
 }job_t;
 typedef darray_t(job_t) da_job;
 extern da_job job;
-char *restore_cmd(da_command *cmds);
-int add_job(char *name,int pid);
+#define EXITJOBPID_SIZE 32
+extern int exitjobpid[EXITJOBPID_SIZE];
+extern size_t exitjobpidsiz;
+char *restore_cmd(command_t *cmds,size_t size);
+int add_job(char *name,int pid,int stat);
 job_t *find_job_pid(int pid);
+job_t *find_job_num(size_t num);
 int del_job_pid(int pid);
 
 void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
 void sig_tstp_handler(int sig);
+void sig_cont_handler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];

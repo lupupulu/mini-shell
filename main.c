@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#define __USE_POSIX
 #include <signal.h>
 
 
@@ -64,9 +65,6 @@ int main(int argc,char *const *argv,char *const *envi){
         i++;
     }
 
-    job_t j={.name=NULL,.next=0,.num=0,.pid=0,.stat=0};
-    da_add(sizeof(job_t),&job,&j);
-
     const char *code=get_var("LANG");
     if(code){
         size_t i=0;
@@ -105,6 +103,8 @@ int main(int argc,char *const *argv,char *const *envi){
     set_terminal_echo(0);
     set_signal_handler(0);
 
+    setpgid(0,0);
+
     g_pid=getpid();
     cmd_unsigned_to_str(g_pid_s,MAX_LL_SIZE-1,g_pid);
 
@@ -112,10 +112,20 @@ int main(int argc,char *const *argv,char *const *envi){
         set_var("PS1=$ ",0);
         set_var("PS2=> ",0);
         set_var("PS4=+ ",0);
+        tcsetpgrp(STDIN_FILENO,getpgrp());
     }
     const char *psn="PS1";
 
+
+
     while(1){
+        for(size_t i=0;i<exitjobpidsiz;i++){
+            del_job_pid(exitjobpid[i]);
+            printf("%d\n",exitjobpid[i]);
+        }
+        exitjobpidsiz=0;
+
+
         const char *ps=NULL;
         if(!is_script){
             ps=get_var(psn);
@@ -123,6 +133,8 @@ int main(int argc,char *const *argv,char *const *envi){
         }
         da_init(&buffer);
         int r=input(input_mod);
+
+
         switch(r){
         case 127:
             return 127;
@@ -559,12 +571,15 @@ int parse_buffer(void){
 
     da_add(sizeof(char*),&history,&tmp_buffer);
 
+    da_clear(&buffer);
+
     if(tmp_buffer_size){
         tmp_buffer=NULL;
         tmp_buffer_size=0;
     }
 
     set_terminal_echo(1);
+    now_name=restore_cmd(commands.arr,commands.size);
     for(size_t i=0;i<commands.size;i++){
         command_t *p=&commands.arr[i];
         if(p->argvn){
@@ -575,6 +590,7 @@ int parse_buffer(void){
         }
         cm_clear(&commands.arr[i]);
     }
+    free(now_name);
     da_fake_clear(&commands);
     if(is_child){
         exit(g_ret);
@@ -593,6 +609,9 @@ int execute_command(da_command *cmds,size_t i){
         }
         return 0;
     }
+    if(!now_name){
+        now_name=restore_cmd(cmds->arr+i,cmds->size-i);
+    }
     if(skip){
         skip=0;
         return 0;
@@ -602,11 +621,20 @@ int execute_command(da_command *cmds,size_t i){
         int pid=fork();
         if(pid){
             is_child=0;
-            add_job(restore_cmd(cmds),pid);
+            int i=add_job(now_name,pid,JOB_RUNNING);
+            now_name=NULL;
             in_bg=!exe_bg_end(p);
+            setpgid(pid,pid);
+            // printf("%d\n",pid);
+            int status;
+            waitpid(pid,&status,WUNTRACED);
+            kill(pid,SIGCONT);
+            job.arr[i].stat=JOB_RUNNING;
             return 0;
         }else{
+            setpgid(0,0);
             is_child=1;
+            raise(SIGSTOP);
         }
     }
     int ret=0;
@@ -818,7 +846,7 @@ int exe_parse_cmd(command_t *cmd,int st){
             r|=exe_parse_redirector(st,redir,fd_a,cmd->cmds+i);
         }else if(st&EXE_START&&is_variable(cmd->cmds+i)){
             set_tmp_env(cmd->cmds+i);
-        }else if(!(st&EXE_START)&&cmd->cmds[i]=='&'&&cmd->cmds[i]=='e'){
+        }else if(!(st&EXE_START)&&cmd->cmds[i]=='&'&&cmd->cmds[i+1]=='e'){
             r|=EXE_DEL_BG;
         }else if(cmd->cmds[i]=='|'&&cmd->cmds[i+1]=='|'){
             r|=EXE_OR;
@@ -865,6 +893,7 @@ int execute_command_parent(command_t *cmd){
     int pid=fork();
     if(pid==0){
         exe_parse_cmd(cmd,EXE_START);
+        set_signal_handler(1);
         if(f){
             r2=f(cmd->argv);
         }else{
@@ -874,7 +903,7 @@ int execute_command_parent(command_t *cmd){
     }else if(pid>0){
         now_pid=pid;
 
-        int status;
+        int status=0;
         waitpid(pid,&status,0);
         int r3=exe_parse_cmd(cmd,EXE_PARENT);
         if(r3&EXE_DEL_BG){
