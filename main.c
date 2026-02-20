@@ -618,25 +618,26 @@ int execute_command(da_command *cmds,size_t i){
     }
 
     if(exe_bg_start(p)){
+        int pipes[2];
+        char tmp[]="1";
+        pipe(pipes);
         int pid=fork();
         if(pid){
-            sig_stop_ign=pid;
             is_child=0;
-            int i=add_job(now_name,pid,JOB_RUNNING);
+            add_job(now_name,pid,JOB_RUNNING);
             now_name=NULL;
             in_bg=!exe_bg_end(p);
             setpgid(pid,pid);
-            // printf("%d\n",pid);
-            int status;
-            waitpid(pid,&status,WUNTRACED);
-            kill(pid,SIGCONT);
-            job.arr[i].stat=JOB_RUNNING;
-            sig_stop_ign=0;
+            read(pipes[0],tmp,1);
+            close(pipes[0]);
+            close(pipes[1]);
             return 0;
         }else{
             setpgid(0,0);
             is_child=1;
-            raise(SIGSTOP);
+            write(pipes[1],tmp,1);
+            close(pipes[0]);
+            close(pipes[1]);
         }
     }
     int ret=0;
@@ -910,7 +911,7 @@ int execute_command_parent(command_t *cmd){
             if(WIFEXITED(status)){
                 break;
             }
-            if(!find_job_pid(pid)&&!is_child){
+            if(!is_child){
                 exe_parse_cmd(cmd,EXE_PARENT);
                 return g_ret;
             }
