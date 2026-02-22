@@ -179,8 +179,11 @@ const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);
 
-#define JOB_RUNNING 0
-#define JOB_STOPPED 1
+#define JOB_RUNNING     0
+#define JOB_STOPPED     1
+#define JOB_OUT_STOPPED 2
+#define JOB_IN_STOPPED  3
+#define JOB_FINISHED    4
 typedef struct {
     char *name;
     size_t num;
@@ -189,19 +192,29 @@ typedef struct {
 }job_t;
 typedef darray_t(job_t) da_job;
 extern da_job job;
-#define EXITJOBPID_SIZE 32
-extern int exitjobpid[EXITJOBPID_SIZE];
-extern size_t exitjobpidsiz;
 char *restore_cmd(command_t *cmds,size_t size);
 int add_job(char *name,int pid,int stat);
-job_t *find_job_pid(int pid);
-job_t *find_job_num(size_t num);
+size_t find_job_pid(int pid);
+size_t find_job_num(size_t num);
+size_t get_job_num(const char *str);
 int del_job_pid(int pid);
+
+typedef struct {
+    int pid;
+    int stat;
+}jobmsg_t;
+#define JOB_MSG_SIZE 64
+extern jobmsg_t jobmsg[JOB_MSG_SIZE];
+extern size_t jobmsgsiz;
+
+#define MAX_JOB_OUT_TIMES 4
+int deal_jobmsg(void);
 
 void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
 void sig_tstp_handler(int sig);
 void sig_cont_handler(int sig);
+void sig_ttou_hangler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];

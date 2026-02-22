@@ -119,12 +119,7 @@ int main(int argc,char *const *argv,char *const *envi){
 
 
     while(1){
-        for(size_t i=0;i<exitjobpidsiz;i++){
-            del_job_pid(exitjobpid[i]);
-            printf("%d\n",exitjobpid[i]);
-        }
-        exitjobpidsiz=0;
-
+        deal_jobmsg();
 
         const char *ps=NULL;
         if(!is_script){
@@ -133,6 +128,8 @@ int main(int argc,char *const *argv,char *const *envi){
         }
         da_init(&buffer);
         int r=input(input_mod);
+
+        deal_jobmsg();
 
 
         switch(r){
@@ -146,6 +143,7 @@ int main(int argc,char *const *argv,char *const *envi){
         case 2:
         case 0:
             int ret=parse_buffer();
+            deal_jobmsg();
             if(ret==1){
                 psn="PS2";
             }else{
@@ -602,6 +600,10 @@ int parse_buffer(void){
 
 int execute_command(da_command *cmds,size_t i){
     static int in_bg,skip;
+    if(i==0){
+        in_bg=0;
+        skip=0;
+    }
     command_t *p=&cmds->arr[i];
     if(in_bg&&!is_child){
         if(exe_bg_end(p)){
@@ -625,6 +627,9 @@ int execute_command(da_command *cmds,size_t i){
         if(pid){
             is_child=0;
             add_job(now_name,pid,JOB_RUNNING);
+            if(jobmsgsiz<JOB_MSG_SIZE){
+                jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=pid,.stat=JOB_RUNNING};
+            }
             now_name=NULL;
             in_bg=!exe_bg_end(p);
             setpgid(pid,pid);
@@ -650,6 +655,9 @@ int execute_command(da_command *cmds,size_t i){
     }
     if(r1&EXE_OR&&!g_ret){
         skip=1;
+    }
+    if(r1&EXE_ADD_BG){
+        in_bg=1;
     }
     if(r1&EXE_DEL_BG){
         if(is_child){
@@ -907,13 +915,18 @@ int execute_command_parent(command_t *cmd){
         now_pid=pid;
 
         int status=0;
-        while(waitpid(pid,&status,WUNTRACED)>0){
+        while(1){
+            if(waitpid(pid,&status,WUNTRACED)<0){
+                continue;
+            }
             if(WIFEXITED(status)){
                 break;
             }
             if(!is_child){
                 exe_parse_cmd(cmd,EXE_PARENT);
-                return g_ret;
+                r1|=EXE_ADD_BG;
+                now_name=NULL;
+                return g_ret|(r1<<8);
             }
         }
         int r3=exe_parse_cmd(cmd,EXE_PARENT);
