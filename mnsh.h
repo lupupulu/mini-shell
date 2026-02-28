@@ -100,6 +100,8 @@ typedef darray_t(char*) da_history;
 extern da_history history;
 extern size_t history_pos;
 
+int delete_history();
+
 #define IN_ECHO        0b01
 #define IN_HANDLE_CHAR 0b10
 int input_basic(void);
@@ -214,7 +216,6 @@ void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
 void sig_tstp_handler(int sig);
 void sig_cont_handler(int sig);
-void sig_ttou_hangler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];

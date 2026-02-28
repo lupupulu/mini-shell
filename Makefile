@@ -1,4 +1,4 @@
-CC = gcc
+CC = cc
 CFLAG ?= -std=c99 -O2 -Wall
 
 BUILD_TYPE ?= DEBUG

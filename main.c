@@ -132,6 +132,7 @@ int main(int argc,char *const *argv,char *const *envi){
         deal_jobmsg();
 
 
+        int ret=0;
         switch(r){
         case 127:
             return 127;
@@ -142,7 +143,7 @@ int main(int argc,char *const *argv,char *const *envi){
             return 0;
         case 2:
         case 0:
-            int ret=parse_buffer();
+            ret=parse_buffer();
             deal_jobmsg();
             if(ret==1){
                 psn="PS2";
@@ -305,9 +306,11 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
     *inter=i;
 
     int ret=0;
+    int redir=0;
 
     while(str[i]!='\0'&&str[i]!=' '){
         char r=0;
+        size_t j=0;
         switch(str[i]){
         case ';':
             if(i==*inter){
@@ -343,8 +346,7 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
             return ret;
         case '>':
         case '<':
-            size_t j=0;
-            int redir=is_redirector(str+*inter,&j,NULL);
+            redir=is_redirector(str+*inter,&j,NULL);
             if(redir){
                 for(size_t k=0;k<j;k++){
                     da_add(sizeof(char),buf,&str[*inter+k]);
@@ -836,7 +838,7 @@ int exe_parse_cmd(command_t *cmd,int st){
     static int pipes[2];
     static int prev_pipe=-1;
 
-    if(!st&EXE_START){
+    if(!(st&EXE_START)){
         recovery_tmp_env();
         exe_parse_redirector(EXE_CLEAR,0,-1,NULL);
     }
