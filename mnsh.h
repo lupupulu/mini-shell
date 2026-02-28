@@ -28,11 +28,21 @@ struct{\
 
 int da_init(void *array);
 int da_add(size_t tp_size,void *array,const void *buf);
+int da_add_loc(size_t tp_size,void *array,const void *buf,size_t i);
+int da_del(size_t tp_size,void *array,size_t i);
 int da_resize(size_t tp_size,void *array,size_t size);
 int da_fake_pop(size_t tp_size,void *array);
 int da_pop(size_t tp_size,void *array);
 int da_fake_clear(void *array);
 int da_clear(void *array);
+
+#define strpair_t(...) struct{char *key;__VA_ARGS__}
+#define strarray_t(pair) darray_t(pair)
+
+typedef int(*strarr_cmp_func)(const char*,const char *);
+size_t strarr_find_loc(size_t pair_size,void *array,const char *key,strarr_cmp_func f);
+#define STRARR_CANNOT_FIND ((size_t)-1)
+size_t strarr_find(size_t pair_size,void *array,const char *key,strarr_cmp_func f);
 
 extern int g_argc;
 #define MAX_LL_SIZE 21
@@ -51,6 +61,7 @@ extern int is_child;
 
 int set_terminal_echo(int enable);
 void set_signal_handler(int enable);
+void child_clear(void);
 
 typedef struct {
     char **argv;
@@ -99,6 +110,8 @@ extern da_str buffer;
 typedef darray_t(char*) da_history;
 extern da_history history;
 extern size_t history_pos;
+
+// int delete_history();
 
 #define IN_ECHO        0b01
 #define IN_HANDLE_CHAR 0b10
@@ -159,6 +172,7 @@ extern da_env env;
 #define VAR_READONLY 0b00000010
 #define VAR_ARRAY    0b00000100
 #define VAR_EXIST    0b10000000
+int cmp_var(const char *a,const char *b);
 variable_t *find_var(const char *var);
 const char *get_var(const char *var);
 int set_var(const char *var,char umask);
@@ -207,14 +221,13 @@ typedef struct {
 extern jobmsg_t jobmsg[JOB_MSG_SIZE];
 extern size_t jobmsgsiz;
 
-#define MAX_JOB_OUT_TIMES 4
+#define MAX_JOB_OUT_TIMES 2
 int deal_jobmsg(void);
 
 void sig_int_handler(int sig);
 void sig_chld_handler(int sig);
 void sig_tstp_handler(int sig);
 void sig_cont_handler(int sig);
-void sig_ttou_hangler(int sig);
 
 #define PATH_BUF_SIZE 4096
 extern char pathbuf[PATH_BUF_SIZE];

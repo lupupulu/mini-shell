@@ -45,6 +45,7 @@ jobmsg_t jobmsg[JOB_MSG_SIZE];
 size_t jobmsgsiz;
 
 char pathbuf[PATH_BUF_SIZE];
+char pwd_pathbuf[PATH_BUF_SIZE];
 char echobuf[ECHO_BUF_SIZE];
 size_t echobufsiz;
 
@@ -545,6 +546,18 @@ int next_history(void){
 }
 
 
+int cmp_var(const char *a,const char *b){
+    size_t len=0;
+    while(a[len]&&b[len]&&a[len]==b[len]&&a[len]!='='){
+        len++;
+    }
+    char la=a[len]=='='?'\0':a[len];
+    char lb=b[len]=='='?'\0':b[len];
+    if(la!=lb){
+        return la<lb?-1:1;
+    }
+    return 0;
+}
 variable_t *find_var(const char *var){
     size_t len=0;
     while(var[len]!='='&&var[len]!='\0'){
@@ -584,6 +597,7 @@ const char *get_var(const char *var){
             return g_pid_s;
         }
     }
+    // strarr_find(sizeof(variable_t),&variable,var,);
     variable_t *v=find_var(var);
     if(!v){
         return NULL;
@@ -929,7 +943,7 @@ int deal_jobmsg(void){
             int status=0;
             size_t j=0;
             while(j<MAX_JOB_OUT_TIMES&&waitpid(job.arr[i].pid,&status,WUNTRACED|WNOHANG)<=0){
-                usleep(50);
+                usleep(10);
                 j++;
             }
 
@@ -1086,6 +1100,7 @@ void sig_tstp_handler(int sig){
     if(!pid){
         setpgid(0,0);
         is_child=1;
+        child_clear();
         write(pipes[1],tmp,1);
         close(pipes[0]);
         close(pipes[1]);
@@ -1341,7 +1356,6 @@ void set_signal_handler(int enable){
         sigaction(SIGCHLD,&sa,NULL);
         sigaction(SIGTSTP,&sa,NULL);
         sigaction(SIGCONT,&sa,NULL);
-        // sigaction(SIGTTOU,&sa,NULL);
         return ;
     }
 
@@ -1358,19 +1372,59 @@ void set_signal_handler(int enable){
 
     sa.sa_handler=sig_cont_handler;
     sigaction(SIGCONT,&sa,NULL);
+}
 
-    // sa.sa_handler=sig_ttou_hangler;
-    // sigaction(SIGTTOU,&sa,NULL);
+void child_clear(void){
+    for(size_t i=0;i<history.size;i++){
+        free(history.arr[i]);
+    }
+    da_clear(&history);
+    for(size_t i=0;i<job.size;i++){
+        free(job.arr[i].name);
+    }
+    da_clear(&job);
+    da_clear(&buffer);
 }
 
 
 int sh_cd(char *const *argv){
     int r=1;
-    const char *p;
-    if(!argv[1]){
+    const char *p=NULL;
+    int l=1;
+
+    size_t i=1;
+    while(argv[i]){
+        if(argv[i][0]!='-'){
+            p=argv[i];
+            goto L;
+        }
+        if(!strcmp(argv[i],"--help")){
+            return 2;
+        }
+        size_t j=1;
+        while(argv[i][j]){
+            if(argv[i][j]=='P'){
+                l=0;
+            }else if(argv[i][j]=='L'){
+                l=1;
+            }else{
+                write(STDERR_FILENO,"cd: invalid option\n",19);
+                return 2;
+            }
+            j++;
+        }
+        i++;
+    }
+    p=argv[i];
+    L:
+    if(!argv[i]){
         p=get_var("HOME");
-    }else{
-        p=argv[1];
+    }
+
+
+    if(argv[i]&&argv[i+1]){
+        write(STDERR_FILENO,"cd: too many arguments\n",23);
+        return 2;
     }
     r=chdir(p);
     if(r){
@@ -1379,24 +1433,91 @@ int sh_cd(char *const *argv){
         write(STDERR_FILENO,": no such file or directory\n",28);
         return 1;
     }
-    pathbuf[0]='\0';
-    strcpy(pathbuf,"PWD=");
-    strcat(pathbuf,p);
+    if(l){
+        pathbuf[0]='\0';
+        strcpy(pathbuf,"PWD=");
+        strcat(pathbuf,p);
+    }else{
+        getcwd(pathbuf,PATH_BUF_SIZE);
+        size_t len=strlen(pathbuf);
+        memmove(pathbuf+4,pathbuf,len);
+        memcpy(pathbuf,"PWD=",4);
+        pathbuf[len+4]='\0';
+    }
     set_var(pathbuf,VAR_EXPORT);
     return 0;
 }
 int sh_pwd(char *const *argv){
-    char *r=getcwd(pathbuf,PATH_BUF_SIZE);
-    if(r!=pathbuf){
-        write(STDERR_FILENO,"pwd: failed\n",12);
-        return 1;
+    size_t i=1;
+    int l=0;
+    while(argv[i]){
+        if(argv[i][0]!='-'){
+            goto L;
+        }
+        if(!strcmp(argv[i],"--help")){
+            return 2;
+        }
+        size_t j=1;
+        while(argv[i][j]){
+            if(argv[i][j]=='P'){
+                l=0;
+            }else if(argv[i][j]=='L'){
+                l=1;
+            }else{
+                write(STDERR_FILENO,"pwd: invalid option\n",20);
+                return 2;
+            }
+            j++;
+        }
+        i++;
+    }
+    L:
+    if(l){
+        const char *r=get_var("PWD");
+        if(!r){
+            write(STDERR_FILENO,"pwd: failed\n",12);
+            return 1;
+        }
+        memcpy(pathbuf,r,strlen(r)+1);
+    }else{
+        char *r=getcwd(pathbuf,PATH_BUF_SIZE);
+        if(r!=pathbuf){
+            write(STDERR_FILENO,"pwd: failed\n",12);
+            return 1;
+        }
     }
     write(STDOUT_FILENO,pathbuf,strlen(pathbuf));
     write(STDOUT_FILENO,"\n",1);
     return 0;
 }
 int sh_history(char *const *argv){
-    unsigned int i=0,len=0;
+    size_t i=1;
+    while(argv[i]){
+        if(argv[i][0]!='-'){
+            write(STDERR_FILENO,"cd: too many arguments\n",23);
+        }
+        if(!strcmp(argv[i],"--help")){
+            return 2;
+        }
+        size_t j=1;
+        while(argv[i][j]){
+            if(argv[i][j]=='c'){
+                for(size_t i=0;i<history.size;i++){
+                    free(history.arr[i]);
+                }
+                da_clear(&history);
+                history_pos=0;
+            }else{
+                write(STDERR_FILENO,"history: invalid option\n",19);
+                return 2;
+            }
+            j++;
+        }
+        i++;
+    }
+
+    i=0;
+    size_t len=0;
     char buf[16];
     while(i<history.size){
         buf[0]=' ';
