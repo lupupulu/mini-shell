@@ -129,32 +129,15 @@ int is_redirector(const char *cmd,size_t *inter,int *a);
 
 
 
-#define HASH_SIZE 63
-
 typedef int(*command_func)(char *const *);
 typedef struct {
     const char *key;
     command_func f;
-    unsigned next;
-}hash_pair_t;
-
-extern hash_pair_t builtin_cmd[];
-extern hash_pair_t builtin_cmd_hash[];
-unsigned int hash_function(const char *str);
-#define MAKE_HASH_FUNCTION \
-unsigned int hash_function(const char *str){\
-    if(!str||!*str)return 0;\
-    unsigned int hash=(unsigned char)*str;\
-    int len=1;\
-    while(str[len]&&len<6){\
-        hash=(hash<<3)^(unsigned char)str[len];\
-        len++;\
-    }\
-    return (hash+len)%HASH_SIZE;\
-}
-command_func is_builtin_cmd(char *const *argv);
-
-
+}builtincmd_t;
+typedef darray_t(builtincmd_t) da_builtincmd;
+extern builtincmd_t builtincmd_arr[];
+extern da_builtincmd builtincmd;
+command_func get_builtin_cmd(const char *cmd);
 
 typedef struct{
     char *var;
@@ -172,8 +155,7 @@ extern da_env env;
 #define VAR_READONLY 0b00000010
 #define VAR_ARRAY    0b00000100
 #define VAR_EXIST    0b10000000
-int cmp_var(const char *a,const char *b);
-variable_t *find_var(const char *var);
+int varcmp(const char *a,const char *b);
 const char *get_var(const char *var);
 int set_var(const char *var,char umask);
 int unset_var(const char *var);
@@ -188,7 +170,6 @@ typedef struct{
 }alias_t;
 typedef darray_t(alias_t) da_alias;
 extern da_alias alias;
-alias_t *find_alias(const char *als);
 const char *get_alias(const char *als);
 int set_alias(const char *als);
 int unset_alias(const char *als);

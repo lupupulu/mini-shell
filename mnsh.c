@@ -545,8 +545,13 @@ int next_history(void){
     return 0;
 }
 
+command_func get_builtin_cmd(const char *cmd){
+    size_t i=strarr_find(sizeof(builtincmd_t),&builtincmd,cmd,strcmp);
+    return i==STRARR_CANNOT_FIND?NULL:builtincmd.arr[i].f;
+}
 
-int cmp_var(const char *a,const char *b){
+
+int varcmp(const char *a,const char *b){
     size_t len=0;
     while(a[len]&&b[len]&&a[len]==b[len]&&a[len]!='='){
         len++;
@@ -557,28 +562,6 @@ int cmp_var(const char *a,const char *b){
         return la<lb?-1:1;
     }
     return 0;
-}
-variable_t *find_var(const char *var){
-    size_t len=0;
-    while(var[len]!='='&&var[len]!='\0'){
-        len++;
-    }
-    for(size_t i=0;i<variable.size;i++){
-        if(!(variable.arr[i].umask&VAR_EXIST)||len!=variable.arr[i].eq_loc){
-            continue;
-        }
-        int flg=0;
-        for(size_t j=0;j<len;j++){
-            if(variable.arr[i].var[j]!=var[j]){
-                flg=1;
-                break;
-            }
-        }
-        if(!flg){
-            return &variable.arr[i];
-        }
-    }
-    return NULL;
 }
 const char *get_var(const char *var){
     if(var[1]=='\0'){
@@ -597,24 +580,20 @@ const char *get_var(const char *var){
             return g_pid_s;
         }
     }
-    // strarr_find(sizeof(variable_t),&variable,var,);
-    variable_t *v=find_var(var);
-    if(!v){
+    size_t i=strarr_find(sizeof(variable_t),&variable,var,varcmp);
+    if(i==STRARR_CANNOT_FIND){
         return NULL;
-    }else if(!(v->umask&VAR_ARRAY)){
-        return v->var+v->eq_loc+1;
+    }else{
+        return variable.arr[i].var+variable.arr[i].eq_loc+1;
     }
     return NULL;
 }
 int set_var(const char *var,char umask){
-    variable_t *v=find_var(var);
     size_t len=strlen(var);
-    if(umask&VAR_ARRAY){
-        while(!var[len-1]&&!var[len]){
-            len++;
-        }
-    }
-    if(v){
+
+    size_t i=strarr_find_loc(sizeof(variable_t),&variable,var,varcmp);
+    if(i<variable.size&&!varcmp(var,variable.arr[i].var)){
+        variable_t *v=&variable.arr[i];
         if(v->umask&VAR_READONLY){
             return 127;
         }
@@ -635,42 +614,38 @@ int set_var(const char *var,char umask){
         v->umask=VAR_EXIST|umask;
         return 0;
     }
-    for(size_t i=0;i<variable.size;i++){
-        if(!(variable.arr[i].umask&VAR_EXIST)){
-            v=&variable.arr[i];
-        }
-    }
-    if(!v){
-        variable_t tmp={};
-        da_add(sizeof(variable_t),&variable,&tmp);
-        v=&variable.arr[variable.size-1];
-    }
-    v->var=malloc((len+1)*sizeof(char));
-    memcpy(v->var,var,len);
-    v->var[len]='\0';
+
+    variable_t v={0};
     for(size_t i=0;i<len;i++){
-        if(v->var[i]=='='){
-            v->eq_loc=i;
+        if(var[i]=='='){
+            v.eq_loc=i;
             break;
         }
     }
-    if(umask&VAR_EXPORT){
-        v->env=set_env(v->var);
+    if(!v.eq_loc){
+        return 0;
     }
-    v->umask=VAR_EXIST|umask;
+
+    v.var=malloc((len+1)*sizeof(char));
+    memcpy(v.var,var,(len+1)*sizeof(char));
+    if(umask&VAR_EXPORT){
+        v.env=set_env(v.var);
+    }
+    v.umask=umask|VAR_EXIST;
+
+    da_add_loc(sizeof(variable_t),&variable,&v,i);
     return 0;
 }
 int unset_var(const char *var){
-    variable_t *v=find_var(var);
-    if(!v||(v&&v->umask&VAR_READONLY)){
+    size_t i=strarr_find(sizeof(variable_t),&variable,var,varcmp);
+    if(i==STRARR_CANNOT_FIND||variable.arr[i].umask&VAR_READONLY){
         return 127;
     }
-    if(v->env){
-        unset_env(v->env);
+    if(variable.arr[i].umask&VAR_EXPORT){
+        unset_env(variable.arr[i].env);
     }
-    free(v->var);
-    *v=variable.arr[variable.size-1];
-    return da_pop(sizeof(variable_t),&variable);
+    free(variable.arr[i].var);
+    return da_del(sizeof(variable_t),&variable,i);
 }
 
 size_t set_env(char *str){
@@ -690,8 +665,9 @@ void unset_env(size_t i){
 }
 
 int set_tmp_env(char *str){
-    variable_t *var=find_var(str);
-    if(var){
+    size_t i=strarr_find(sizeof(variable_t),&variable,str,varcmp);
+    if(i!=STRARR_CANNOT_FIND){
+        variable_t *var=&variable.arr[i];
         if(var->umask&VAR_READONLY){
             return 127;
         }
@@ -711,7 +687,8 @@ int set_tmp_env(char *str){
 int recovery_tmp_env(void){
     for(size_t i=0;i<tmp_env.size;i++){
         if(tmp_env.arr[i].umask){
-            variable_t *var=find_var(tmp_env.arr[i].var);
+            size_t j=strarr_find(sizeof(variable_t),&variable,tmp_env.arr[i].var,varcmp);
+            variable_t *var=&variable.arr[j];
             free(var->var);
             memcpy(var,&tmp_env.arr[i],sizeof(variable_t));
         }else{
@@ -722,50 +699,22 @@ int recovery_tmp_env(void){
     return 0;
 }
 
-alias_t *find_alias(const char *als){
-    if(is_script){
-        return NULL;
-    }
-
-    size_t len=0;
-    while(als[len]!='='&&als[len]!='\0'){
-        len++;
-    }
-    for(size_t i=0;i<alias.size;i++){
-        if(alias.arr[i].eq_loc!=len){
-            continue;
-        }
-        int flg=0;
-        for(size_t j=0;j<len;j++){
-            if(alias.arr[i].var[j]!=als[j]){
-                flg=1;
-                break;
-            }
-        }
-        if(!flg){
-            return &alias.arr[i];
-        }
-    }
-    return NULL;
-}
 const char *get_alias(const char *als){
-    alias_t *a=find_alias(als);
-    return a?(a->var+a->eq_loc+1):NULL;
+    size_t i=strarr_find(sizeof(alias_t),&alias,als,varcmp);
+    return i==STRARR_CANNOT_FIND?NULL:alias.arr[i].var+alias.arr[i].eq_loc+1;
 }
 int set_alias(const char *als){
     if(is_script){
         return 0;
     }
 
-    alias_t *a=find_alias(als);
-    if(a){
-        size_t len=strlen(a->var+a->eq_loc+1);
-        void *p=realloc(a->var,sizeof(char)*(a->eq_loc+len+1));
-        if(!p){
-            return 127;
-        }
-        a->var=p;
-        memcpy(a->var+a->eq_loc+1,als+a->eq_loc+1,len+1);
+    size_t i=strarr_find_loc(sizeof(alias_t),&alias,als,varcmp);
+    if(i<alias.size&&!varcmp(als,alias.arr[i].var)){
+        alias_t *a=&alias.arr[i];
+        size_t len=strlen(als);
+        a->var=realloc(a->var,sizeof(char)*(len+1));
+        memcpy(a->var,als,(len+1)*sizeof(char));
+        return 0;
     }
     size_t len=strlen(als);
     alias_t tmp={
@@ -777,18 +726,17 @@ int set_alias(const char *als){
         tmp.eq_loc++;
     }
 
-    da_add(sizeof(alias_t),&alias,&tmp);
+    da_add_loc(sizeof(alias_t),&alias,&tmp,i);
 
     return 0;
 }
 int unset_alias(const char *als){
-    alias_t *a=find_alias(als);
-    if(!a){
+    size_t i=strarr_find(sizeof(alias_t),&alias,als,varcmp);
+    if(i==STRARR_CANNOT_FIND){
         return 127;
     }
-    free(a->var);
-    memcpy(a,&alias.arr[alias.size-1],sizeof(alias_t));
-    da_pop(sizeof(alias),&alias);
+    free(alias.arr[i].var);
+    da_del(sizeof(alias_t),&alias,i);
     return 0;
 }
 
@@ -1133,32 +1081,6 @@ void sig_cont_handler(int sig){
     }
 }
 
-
-MAKE_HASH_FUNCTION
-
-command_func is_builtin_cmd(char *const *argv){
-    unsigned int hash=hash_function(argv[0]);
-    unsigned int len=0;
-    while(argv[0][len++]){
-        if(len>8){
-            return 0;
-        }
-    }
-
-    if(builtin_cmd_hash[hash].key&&!strcmp(builtin_cmd_hash[hash].key,argv[0])){
-        return builtin_cmd_hash[hash].f;
-    }
-
-    unsigned now=builtin_cmd_hash[hash].next;
-    while(now){
-        if(builtin_cmd_hash[hash].key&&!strcmp(builtin_cmd[now].key,argv[0])){
-            return builtin_cmd[now].f;
-        }
-        now=builtin_cmd[now].next;
-    }
-
-    return 0;
-}
 
 
 

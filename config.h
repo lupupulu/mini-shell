@@ -3,7 +3,7 @@
 
 #include "mnsh.h"
 
-key_setting_t key_setting[] = {
+key_setting_t key_setting[]={
     { 0x01 , NULL , "to_start"        },
     { 0x02 , NULL , "to_start"        },
     { 0x06 , NULL , "to_end"          },
@@ -22,6 +22,18 @@ key_setting_t key_setting[] = {
     { 0x1B , "[F"    , "to_end"       },
     { 0x1B , "[1;5D" , "last_word"    },
     { 0x1B , "[1;5C" , "next_word"    },
+};
+
+
+const char *builtincmd_list[]={
+    "cd","pwd","history",
+    "export","readonly","unset",
+    "read","echo",
+    "jobs","fg","bg","wait",
+    "test","true","false",
+    "command","exec","eval","times",
+    "trap","set","shift","getopts",
+    "umask","alias","unalias","type"
 };
 
 #endif

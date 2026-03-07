@@ -449,13 +449,14 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
         if(is_first_item&&!is_script){
             const char *als=get_alias(buf.arr);
             if(als&&!flg){
+                is_first_item=0;
                 free(buf.arr);
                 size_t i=0;
                 parse_command(now,als,&i,1);
                 now->argvn--;
                 is_parsing_item=1;
+                continue;
             }
-            is_first_item=0;
         }
 
         if(last_is_redirector){
@@ -504,6 +505,7 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
             free(buf.arr);
         }else{
             is_parsing_item=1;
+            is_first_item=0;
             cm_add_item(now,buf.arr);
         }
     }
@@ -892,7 +894,7 @@ int execute_command_parent(command_t *cmd){
         }
         return 0;
     }
-    command_func f=is_builtin_cmd(cmd->argv);
+    command_func f=get_builtin_cmd(cmd->argv[0]);
     int r1=exe_parse_cmd(cmd,EXE_START|EXE_PARENT);
     int r2=0;
 
