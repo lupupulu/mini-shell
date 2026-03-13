@@ -1,13 +1,16 @@
 #ifndef MNSH_H
 #define MNSH_H
 
+#define _GNU_SOURCE
+
 #include <stddef.h>
 
 #define IS_LEGAL(c) (\
         ((c)>='A'&&(c)<='Z')||\
         ((c)>='a'&&(c)<='z')||\
         ((c)>='0'&&(c)<='9')||\
-        (c)=='_'\
+        (c)=='_'||\
+        ((char)c)<0\
     )
 
 #define IS_SPECIAL_VARIABLE(c) \
@@ -44,14 +47,13 @@ size_t strarr_find_loc(size_t pair_size,void *array,const char *key,strarr_cmp_f
 #define STRARR_CANNOT_FIND ((size_t)-1)
 size_t strarr_find(size_t pair_size,void *array,const char *key,strarr_cmp_func f);
 
+#define MAX_LL_SIZE 24
+
 extern int g_argc;
-#define MAX_LL_SIZE 21
-extern char g_argc_s[MAX_LL_SIZE];
 extern char* const* g_argv;
+extern void *g_argv_var;
 extern int g_ret;
-extern char g_ret_s[MAX_LL_SIZE];
 extern int g_pid;
-extern char g_pid_s[MAX_LL_SIZE];
 
 extern int now_pid;
 extern char *now_name;
@@ -63,28 +65,21 @@ int set_terminal_echo(int enable);
 void set_signal_handler(int enable);
 void child_clear(void);
 
-typedef struct {
-    char **argv;
-    char *cmds;
-    size_t argvn;
-    size_t cmdlen;
-}command_t;
-typedef darray_t(command_t) da_command;
 
 size_t next_char(const char *str,size_t pos,size_t size);
 size_t last_char(const char *str,size_t pos);
 size_t get_char_width(const char *c);
-size_t get_char_len(char c);
-
-size_t utf8_get_char_width(const char *c);
+size_t get_char_len(const char *c);
 
 #define ECHO_BUF_SIZE 256
 void echo_unsigned_to_buf(size_t num);
 void echo_to_buf(const char *str,size_t size);
 void echo_buf_to_fd(int fd);
 
-unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num);
-unsigned cmd_str_to_unsigned(const char *str,unsigned long size);
+size_t cmd_unsigned_to_str(char *str,size_t size,size_t num);
+char *cmd_num_to_str(size_t num,int is_negative);
+typedef struct{size_t num;int is_negative;int unexcepted_char;} num_t;
+num_t cmd_str_to_num(const char *str);
 int cmd_execvpe(const char *file, char *const argv[],char *const envp[]);
 
 const char *file_is_exist(const char *file,int type,int is_cmd);
@@ -99,11 +94,6 @@ int is_variable(const char *cmd);
 #define UTF8_1_CHECK_UMASK 0b11000000
 #define UTF8_1_UMASK       0b10000000
 #define UTF8_CHECK(c,n) (((c)&UTF8_##n##_CHECK_UMASK)==UTF8_##n##_UMASK)
-typedef enum{
-    C,
-    UTF8
-}codeset_t;
-extern codeset_t codeset;
 
 typedef darray_t(char) da_str;
 extern da_str buffer;
@@ -128,6 +118,40 @@ int input(unsigned umask);
 int is_redirector(const char *cmd,size_t *inter,int *a);
 
 
+#define CMD_PIPE  2
+#define CMD_REDIR 3
+#define CMD_BG    4
+#define CMD_AND   5
+#define CMD_OR    6
+#define CMD_VAR      -1
+#define CMD_PIPE_END -2
+#define CMD_BG_END   -4
+
+typedef struct {
+    int type;
+    int op;
+    int _1;
+    char *_2;
+}command_redir_t;
+typedef struct {
+    int type;
+    unsigned umask;
+    char *var;
+}command_var_t;
+
+typedef struct {
+    char **argv;
+    int **cmds;
+    size_t argvn;
+    size_t cmdsn;
+}command_t;
+typedef darray_t(command_t) da_command;
+
+int cm_init(command_t *cm);
+int cm_add_item(command_t *cm,char *item);
+int cm_add_cmd(command_t *cm,void *v,size_t size);
+int cm_clear(command_t *cm);
+
 
 typedef int(*command_func)(char *const *);
 typedef struct {
@@ -139,7 +163,7 @@ extern builtincmd_t builtincmd_arr[];
 extern da_builtincmd builtincmd;
 command_func get_builtin_cmd(const char *cmd);
 
-typedef struct{
+typedef struct {
     char *var;
     size_t eq_loc;
     unsigned umask;
@@ -151,20 +175,44 @@ extern da_variable tmp_env;
 typedef darray_t(char*) da_env;
 extern da_env env;
 
-#define VAR_EXPORT   0b00000001
-#define VAR_READONLY 0b00000010
-#define VAR_ARRAY    0b00000100
-#define VAR_EXIST    0b10000000
+
+#define var_arr_t(Tp) struct{size_t size;Tp data[0];}
+#define VAR_ARR_SIZE(Tp,arr) (sizeof(var_arr_t(Tp))+arr->size*sizeof(Tp))
+typedef long var_int_t;
+typedef struct {
+    command_t *value;
+    size_t size;
+}var_func_t;
+
+typedef struct {
+    void *value;
+    unsigned umask;
+}var_t;
+
+#define VAR_EXPORT          0b00000001
+#define VAR_READONLY        0b00000010
+#define VAR_ARRAY           0b00000100
+#define VAR_INT             0b00001000
+#define VAR_FUNC            0b00010000
+#define VAR_EXPAND          0b00100000
+#define VAR_EXPAND_IN_QUOTE 0b01000000
+#define VAR_EXIST           0b1000000000000000
 int varcmp(const char *a,const char *b);
-const char *get_var(const char *var);
+var_t get_var(const char *var);
+const char *gets_var(const char *var);
 int set_var(const char *var,char umask);
 int unset_var(const char *var);
+int clear_var(void *v,unsigned umask);
+
 size_t set_env(char *str);
 void unset_env(size_t i);
+
 int set_tmp_env(char *str);
 int recovery_tmp_env(void);
 
-typedef struct{
+
+
+typedef struct {
     char *var;
     size_t eq_loc;
 }alias_t;
@@ -187,12 +235,14 @@ typedef struct {
 }job_t;
 typedef darray_t(job_t) da_job;
 extern da_job job;
-char *restore_cmd(command_t *cmds,size_t size);
 int add_job(char *name,int pid,int stat);
 size_t find_job_pid(int pid);
 size_t find_job_num(size_t num);
 size_t get_job_num(const char *str);
 int del_job_pid(int pid);
+
+void restore_cmd_redir(da_str *str,command_redir_t *r);
+char *restore_cmd(command_t *cmds,size_t size);
 
 typedef struct {
     int pid;

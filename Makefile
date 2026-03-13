@@ -8,7 +8,7 @@ RELEASE = -s
 DEBUG =
 else ifeq ($(BUILD_TYPE),DEBUG)
 RELEASE =
-DEBUG = -g --static
+DEBUG = -g --static -DTERM_TOSTOP
 else
 RELEASE =
 DEBUG =
@@ -16,7 +16,7 @@ endif
 
 ALL: mnsh
 
-mnsh: main.c config.c mnsh.o darray.o locale.o
+mnsh: main.c config.c mnsh.o darray.o
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 config.c: init config.h
@@ -31,13 +31,10 @@ mnsh.o: mnsh.c mnsh.h
 darray.o: darray.c mnsh.h
 	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
 
-locale.o: locale.c mnsh.h
-	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
-
 echokey: echokey.c
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 clean:
-	- rm -f mnsh init config.c mnsh.o darray.o locale.o echokey
+	- rm -f mnsh init config.c mnsh.o darray.o echokey
 
 .PHONY: clean

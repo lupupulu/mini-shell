@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-codeset_t codeset;
 da_str buffer;
 
 key_setting_list_t key_config[CHAR_MAX];

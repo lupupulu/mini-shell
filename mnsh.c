@@ -4,23 +4,19 @@
 #include <stdio.h>
 #include <termios.h>
 #include <sys/wait.h>
-#define __USE_POSIX
-#define __USE_XOPEN_EXTENDED
 #include <unistd.h>
 #include <signal.h>
+#include <locale.h>
+#include <wchar.h>
 
 int g_argc;
-char g_argc_s[MAX_LL_SIZE];
 char* const* g_argv;
+void *g_argv_var;
 int g_ret;
-char g_ret_s[MAX_LL_SIZE];
 int g_pid;
-char g_pid_s[MAX_LL_SIZE];
 
 int now_pid;
 char *now_name;
-
-codeset_t codeset;
 
 int is_script;
 int is_child;
@@ -114,11 +110,12 @@ int input(unsigned umask){
             now_is_bufffer=1;
             return 0;
         }else if(deal_keys(c)==-1){
+            memset(buf,0,sizeof(buf));
             buf[0]=c;
-            ret=get_char_len(c);
-            for(int i=1;i<ret;i++){
+            size_t i=1;
+            while((ret=get_char_len(buf))<0){
                 read(STDIN_FILENO,&c,1);
-                buf[i]=c;
+                buf[i++]=c;
             }
             insert(buf,ret);
         }
@@ -171,67 +168,39 @@ int deal_keys(unsigned char c){
 
 
 size_t next_char(const char *str,size_t pos,size_t size){
-    if(pos>=size){
+    wchar_t wc;
+    int r=mbtowc(&wc,str+pos,MB_CUR_MAX);
+    if(r<=0){
         return pos;
     }
-    switch(codeset){
-    case C:
-        break;
-    case UTF8:
-        if(UTF8_CHECK(str[pos],2)&&pos+2<size){
-            return pos+2;
-        }else if(UTF8_CHECK(str[pos],3)&&pos+3<size){
-            return pos+3;
-        }else if(UTF8_CHECK(str[pos],4)&&pos+4<size){
-            return pos+4;
-        }
-        break;
-    }
-    return pos+1;
+    return pos+r;
 }
 
 size_t last_char(const char *str,size_t pos){
     if(!pos){
         return 0;
     }
-    switch(codeset){
-    case C:
-        break;
-    case UTF8:
-        pos--;
-        while(pos&&UTF8_CHECK(str[pos],1)){
-            pos--;
-        }
-        return pos;
+    wchar_t wc;
+    size_t i=1;
+    while(pos-i&&mbtowc(&wc,str+pos-i,MB_CUR_MAX)<0){
+        i++;
     }
-    return pos-1;
+    return pos-i;
 }
 
 size_t get_char_width(const char *c){
-    switch(codeset){
-    case C:
-        return 1;
-    case UTF8:
-        return utf8_get_char_width(c);
+    wchar_t wc;
+    int r=mbtowc(&wc,c,MB_CUR_MAX);
+    if(r<0){
+        return 0;
     }
-    return 1;
+    return wcwidth(wc);
 }
 
-size_t get_char_len(char c){
-    switch(codeset){
-    case C:
-        break;
-    case UTF8:
-        if(UTF8_CHECK(c,2)){
-            return 2;
-        }else if(UTF8_CHECK(c,3)){
-            return 3;
-        }else if(UTF8_CHECK(c,4)){
-            return 4;
-        }
-        break;
-    }
-    return 1;
+size_t get_char_len(const char *c){
+    wchar_t wc;
+    int r=mbtowc(&wc,c,MB_CUR_MAX);
+    return r;
 }
 
 
@@ -247,7 +216,7 @@ void insert(const char *c,unsigned len){
     size_t dpos=pos;
     while(i<len){
         dpos=next_char(buffer.arr,dpos,buffer.size);
-        i+=get_char_len(c[i]);
+        i+=get_char_len(&c[i]);
     }
     pos=buffer.size;
     to_pos(dpos);
@@ -267,8 +236,11 @@ void clean_show(size_t tpos){
         cnt--;
     }
     if(tpos<pos){
-        // dpos=last_char(buffer.arr,pos);
         dpos=pos;
+        if(dpos==buffer.size){
+            echo_to_buf("\b \b",3);
+            dpos=last_char(buffer.arr,dpos);
+        }
         while(dpos>tpos){
             width=get_char_width(&buffer.arr[dpos]);
             echo_to_buf("\b\b",width);
@@ -286,8 +258,8 @@ void to_pos(size_t tpos){
     size_t dpos=pos;
     if(tpos>pos){
         while(dpos<tpos){
-            dpos=next_char(buffer.arr,dpos,buffer.size);
             echo_to_buf("\033[C\033[C",3*get_char_width(&buffer.arr[dpos]));
+            dpos=next_char(buffer.arr,dpos,buffer.size);
         }
     }else if(tpos<pos){
         while(dpos>tpos){
@@ -545,6 +517,49 @@ int next_history(void){
     return 0;
 }
 
+
+int cm_init(command_t *cm){
+    memset(cm,0,sizeof(command_t));
+    return 0;
+}
+int cm_add_item(command_t *cm,char *item){
+    void *p=realloc(cm->argv,(cm->argvn+1)*sizeof(char*));
+    if(!p){
+        return 127;
+    }
+    cm->argv=p;
+    cm->argv[cm->argvn]=item;
+    cm->argvn++;
+    return 0;
+}
+int cm_add_cmd(command_t *cm,void *v,size_t size){
+    if(!cm->cmdsn){
+        cm->cmds=NULL;
+    }
+    cm->cmds=realloc(cm->cmds,sizeof(int*)*(cm->cmdsn+1));
+    cm->cmds[cm->cmdsn]=malloc(size);
+    memcpy(cm->cmds[cm->cmdsn],v,size);
+    cm->cmdsn++;
+    return 0;
+}
+int cm_clear(command_t *cm){
+    free(cm->argv);
+    for(size_t i=0;i<cm->cmdsn;i++){
+        if(*cm->cmds[i]==CMD_VAR){
+            command_var_t *v=(void*)cm->cmds[i];
+            free(v->var);
+        }else if(*cm->cmds[i]==CMD_REDIR){
+            command_redir_t *r=(void*)cm->cmds[i];
+            free(r->_2);
+        }
+        free(cm->cmds[i]);
+    }
+    free(cm->cmds);
+    memset(cm,0,sizeof(command_t));
+    return 0;
+}
+
+
 command_func get_builtin_cmd(const char *cmd){
     size_t i=strarr_find(sizeof(builtincmd_t),&builtincmd,cmd,strcmp);
     return i==STRARR_CANNOT_FIND?NULL:builtincmd.arr[i].f;
@@ -563,33 +578,78 @@ int varcmp(const char *a,const char *b){
     }
     return 0;
 }
-const char *get_var(const char *var){
+var_t get_var(const char *var){
+    static char ret[MAX_LL_SIZE];
+    if(var[0]>='0'&&var[0]<='9'){
+        num_t r=cmd_str_to_num(var);
+        if(r.is_negative||r.unexcepted_char){
+            goto L;
+        }
+        if(r.num>g_argc){
+            return (var_t){.value=NULL,.umask=0};
+        }else{
+            return (var_t){.value=g_argv[r.num],.umask=VAR_EXPORT|VAR_EXIST};
+        }
+    }
+    L:
     if(var[1]=='\0'){
-        if(var[0]>='0'&&var[0]<='9'){
-            if(var[0]-'0'>g_argc){
-                return NULL;
-            }else{
-                return g_argv[var[0]-'0'];
-            }
-        }else if(var[0]=='#'){
-            return g_argc_s;
+        if(var[0]=='#'){
+            cmd_unsigned_to_str(ret,MAX_LL_SIZE,g_argc);
+            return (var_t){.value=ret,.umask=VAR_EXPORT|VAR_EXIST};
         }else if(var[0]=='?'){
-            cmd_unsigned_to_str(g_ret_s,MAX_LL_SIZE-1,g_ret);
-            return g_ret_s;
+            cmd_unsigned_to_str(ret,MAX_LL_SIZE,g_ret);
+            return (var_t){.value=ret,.umask=VAR_EXPORT|VAR_EXIST};
         }else if(var[0]=='$'){
-            return g_pid_s;
+            cmd_unsigned_to_str(ret,MAX_LL_SIZE,g_argc);
+            return (var_t){.value=ret,.umask=VAR_EXPORT|VAR_EXIST};
+        }else if(var[0]=='@'){
+            return (var_t){.value=g_argv_var,.umask=VAR_EXIST|VAR_ARRAY|VAR_EXPAND|VAR_EXPAND_IN_QUOTE};
+        }else if(var[0]=='*'){
+            return (var_t){.value=g_argv_var,.umask=VAR_EXIST|VAR_ARRAY|VAR_EXPAND};
         }
     }
     size_t i=strarr_find(sizeof(variable_t),&variable,var,varcmp);
     if(i==STRARR_CANNOT_FIND){
-        return NULL;
+        return (var_t){.value=NULL,.umask=0};
     }else{
-        return variable.arr[i].var+variable.arr[i].eq_loc+1;
+        return (var_t){.value=variable.arr[i].var+variable.arr[i].eq_loc+1,.umask=variable.arr[i].umask};
     }
-    return NULL;
+    return (var_t){.value=NULL,.umask=0};
+}
+const char *gets_var(const char *var){
+    var_t r=get_var(var);
+    if(r.umask&(VAR_INT|VAR_FUNC)){
+        return NULL;
+    }
+    if(r.umask&VAR_ARRAY){
+        return *(const char**)(r.value+sizeof(size_t));
+    }
+    return r.value;
 }
 int set_var(const char *var,char umask){
-    size_t len=strlen(var);
+    size_t len=0;
+    size_t eq_loc=0;
+    while(var[eq_loc]!='='){
+        eq_loc++;
+    }
+    if(umask&VAR_ARRAY){
+        if(umask&VAR_INT){
+            var_arr_t(var_int_t) *arr=(void*)&var[eq_loc+1];
+            len=eq_loc+VAR_ARR_SIZE(var_int_t,arr);
+        }else if(umask&VAR_FUNC){
+            var_arr_t(var_func_t) *arr=(void*)&var[eq_loc+1];
+            len=eq_loc+VAR_ARR_SIZE(var_func_t,arr);
+        }else{
+            var_arr_t(char*) *arr=(void*)&var[eq_loc+1];
+            len=eq_loc+VAR_ARR_SIZE(char*,arr);
+        }
+    }else if(umask&VAR_INT){
+        len=eq_loc+sizeof(var_int_t);
+    }else if(umask&VAR_FUNC){
+        len=eq_loc+sizeof(var_func_t);
+    }else{
+        len=strlen(var)+1;
+    }
 
     size_t i=strarr_find_loc(sizeof(variable_t),&variable,var,varcmp);
     if(i<variable.size&&!varcmp(var,variable.arr[i].var)){
@@ -597,13 +657,12 @@ int set_var(const char *var,char umask){
         if(v->umask&VAR_READONLY){
             return 127;
         }
-        void *p=realloc(v->var,len+1);
+        void *p=realloc(v->var,len);
         if(!p){
             return 127;
         }
         v->var=p;
         memcpy(v->var+v->eq_loc+1,var+v->eq_loc+1,len-v->eq_loc-1);
-        v->var[len]='\0';
 
         if(v->umask&VAR_EXPORT&&!(umask&VAR_EXPORT)){
             unset_env(v->env);
@@ -615,25 +674,41 @@ int set_var(const char *var,char umask){
         return 0;
     }
 
-    variable_t v={0};
-    for(size_t i=0;i<len;i++){
-        if(var[i]=='='){
-            v.eq_loc=i;
-            break;
-        }
-    }
+    variable_t v={.eq_loc=eq_loc};
     if(!v.eq_loc){
         return 0;
     }
 
-    v.var=malloc((len+1)*sizeof(char));
-    memcpy(v.var,var,(len+1)*sizeof(char));
+    v.var=malloc(len);
+    memcpy(v.var,var,len);
     if(umask&VAR_EXPORT){
         v.env=set_env(v.var);
     }
     v.umask=umask|VAR_EXIST;
 
     da_add_loc(sizeof(variable_t),&variable,&v,i);
+    return 0;
+}
+int clear_var(void *v,unsigned umask){
+    if(!(umask&(VAR_FUNC|VAR_INT|VAR_ARRAY))||umask&VAR_INT){
+        return 0;
+    }
+    size_t size=0;
+    if(umask&VAR_ARRAY){
+        size=*(size_t*)v;
+        v=v+sizeof(size_t);
+    }
+    for(size_t i=0;i<size;i++){
+        if(umask&VAR_FUNC){
+            for(size_t j=0;j<((var_func_t*)v)->size;j++){
+                cm_clear(&(*(var_func_t**)v)->value[i]);
+            }
+            v+=sizeof(var_func_t);
+        }else{
+            free(*(char**)v);
+            v+=sizeof(char*);
+        }
+    }
     return 0;
 }
 int unset_var(const char *var){
@@ -644,13 +719,15 @@ int unset_var(const char *var){
     if(variable.arr[i].umask&VAR_EXPORT){
         unset_env(variable.arr[i].env);
     }
+    clear_var(variable.arr[i].var,variable.arr[i].umask);
     free(variable.arr[i].var);
     return da_del(sizeof(variable_t),&variable,i);
 }
 
+
 size_t set_env(char *str){
     env.arr[env.size-1]=str;
-    char *tmp=NULL; 
+    char *tmp=NULL;
     da_add(sizeof(char*),&env,&tmp);
     return env.size-2;
 }
@@ -740,6 +817,56 @@ int unset_alias(const char *als){
     return 0;
 }
 
+void restore_cmd_redir(da_str *str,command_redir_t *r){
+    if(r->_1>=0){
+        int fd=(size_t)r->_1;
+        int a=fd;
+        size_t len=0;
+        do{a/=10,len++;}while(a);
+        for(size_t i=0;i<len;i++){
+            char c=fd%10+'0';
+            da_add_loc(sizeof(char),str,&c,0);
+        }
+    }
+
+    switch(r->op){
+    case REDIR_IN:
+        da_add(sizeof(char),str,"<");
+        break;
+    case REDIR_OUT:
+        da_add(sizeof(char),str,">");
+        break;
+    case REDIR_OUT_ADD:
+        da_add(sizeof(char),str,">");
+        da_add(sizeof(char),str,">");
+        break;
+    case REDIR_DUP:
+        da_add(sizeof(char),str,">");
+        da_add(sizeof(char),str,"&");
+        break;
+    case REDIR_HERE_DOCUMENT:
+        da_add(sizeof(char),str,"<");
+        da_add(sizeof(char),str,"<");
+        break;
+    case REDIR_HERE_STRING:
+        da_add(sizeof(char),str,"<");
+        da_add(sizeof(char),str,"<");
+        da_add(sizeof(char),str,"<");
+        break;
+    case REDIR_CLOSE:
+        da_add(sizeof(char),str,">");
+        da_add(sizeof(char),str,"&");
+        da_add(sizeof(char),str,"-");
+        break;
+    }
+
+    if(r->_2){
+        for(size_t i=0;r->_2[i];i++){
+            da_add(sizeof(char),str,&r->_2[i]);
+        }
+    }
+}
+
 char *restore_cmd(command_t *cmds,size_t size){
     da_str tmp;
     da_init(&tmp);
@@ -748,49 +875,66 @@ char *restore_cmd(command_t *cmds,size_t size){
 
     for(size_t i=0;i<size;i++){
         command_t *now=&cmds[i];
-        size_t j=0;
-        while(j<now->cmdlen&&now->cmds[j]){
-            size_t len=strlen(now->cmds+j);
-            if(!is_variable(now->cmds+j)){
-                j+=len+1;
+
+        for(size_t j=0;j<now->cmdsn;j++){
+            int *r=now->cmds[j];
+            if(*r!=CMD_VAR){
                 continue;
             }
-            for(size_t k=0;k<len;k++){
-                da_add(sizeof(char),&tmp,&now->cmds[j+k]);
+            command_var_t *v=(void*)r;
+            if(v->umask&(VAR_ARRAY|VAR_INT|VAR_FUNC)){
+                continue;
             }
-            da_add(sizeof(char),&tmp," ");
-            j+=len+1;
+            size_t len=strlen(v->var);
+            for(size_t k=0;k<len;k++){
+                da_add(sizeof(char),&tmp,&v->var[k]);
+            }
         }
 
-        for(j=0;j<now->argvn&&now->argv[j];j++){
+        for(size_t j=0;j<now->argvn&&now->argv[j];j++){
             size_t len=strlen(now->argv[j]);
             for(size_t k=0;k<len;k++){
                 da_add(sizeof(char),&tmp,&now->argv[j][k]);
             }
-            da_add(sizeof(char),&tmp," ");
+            if(now->argv[j+1]!=NULL){
+                da_add(sizeof(char),&tmp," ");
+            }
         }
 
-        j=0;
-        while(j<now->cmdlen&&now->cmds[j]){
-            size_t len=strlen(now->cmds+j);
-            if(is_variable(now->cmds+j)||((now->cmds[j]=='|'||now->cmds[j]=='&')&&now->cmds[j+1]=='e')){
-                if(now->cmds[j]=='&'&&now->cmds[j+1]=='e'){
-                    ret_flg=1;
-                }
-                j+=len+1;
-                continue;
-            }
-            if(now->cmds[j]=='|'){
-                da_add(sizeof(char),&tmp,"|");
-                da_add(sizeof(char),&tmp," ");
-                j+=len+1;
-                continue;
-            }
-            for(size_t k=0;k<len;k++){
-                da_add(sizeof(char),&tmp,&now->cmds[j+k]);
-            }
+        if(now->cmdsn){
             da_add(sizeof(char),&tmp," ");
-            j+=len+1;
+        }
+        for(size_t j=0;j<now->cmdsn;j++){
+            int *r=now->cmds[j];
+            size_t last_len=tmp.size;
+            switch(*r){
+            case CMD_BG_END:
+                ret_flg=1;
+                break;
+            case CMD_PIPE:
+                da_add(sizeof(char),&tmp,"|");
+                break;
+            case CMD_REDIR:
+                restore_cmd_redir(&tmp,(void*)r);
+                break;
+            case CMD_AND:
+                da_add(sizeof(char),&tmp,"&");
+                da_add(sizeof(char),&tmp,"&");
+                break;
+            case CMD_BG:
+                da_add(sizeof(char),&tmp,"&");
+                break;
+            case CMD_OR:
+                da_add(sizeof(char),&tmp,"|");
+                da_add(sizeof(char),&tmp,"|");
+                break;
+            }
+            if(*r<0){
+                continue;
+            }
+            if(last_len<tmp.size&&(j<now->cmdsn-1||i<size-1)){
+                da_add(sizeof(char),&tmp," ");
+            }
         }
 
         if(ret_flg){
@@ -847,7 +991,11 @@ size_t get_job_num(const char *str){
             num=job.arr[job.size-1].num;
         }
     }else{
-        num=cmd_str_to_unsigned(str+1,strlen(str+1));
+        num_t r=cmd_str_to_num(str+1);
+        if(r.is_negative||r.unexcepted_char){
+            return -1;
+        }
+        num=r.num;
     }
     if(num==(unsigned)-1){
         return -1;
@@ -1035,36 +1183,7 @@ void sig_tstp_handler(int sig){
         raise(SIGSTOP);
         return ;
     }
-    size_t i=find_job_pid(now_pid);
-    if(i!=(size_t)-1){
-        kill(now_pid,SIGTSTP);
-        return ;
-    }
-    kill(now_pid,SIGSTOP);
-    int pipes[2];
-    char tmp[]="1";
-    pipe(pipes);
-    int pid=fork();
-    if(!pid){
-        setpgid(0,0);
-        is_child=1;
-        child_clear();
-        write(pipes[1],tmp,1);
-        close(pipes[0]);
-        close(pipes[1]);
-        return ;
-    }
-    is_child=0;
-    setpgid(pid,pid);
-    add_job(now_name,pid,JOB_STOPPED);
-    if(jobmsgsiz<JOB_MSG_SIZE){
-        jobmsg[jobmsgsiz++]=(jobmsg_t){.pid=pid,.stat=JOB_RUNNING};
-    }
-    read(pipes[0],tmp,1);
-    close(pipes[0]);
-    close(pipes[1]);
-    kill(pid,SIGSTOP);
-    now_pid=0;
+    kill(now_pid,SIGTSTP);
 }
 void sig_cont_handler(int sig){
     if(now_pid<=0){
@@ -1084,7 +1203,7 @@ void sig_cont_handler(int sig){
 
 
 
-unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
+size_t cmd_unsigned_to_str(char *str,size_t size,size_t num){
     unsigned i=0,tmp=num;
     do{
         tmp/=10;
@@ -1101,15 +1220,40 @@ unsigned cmd_unsigned_to_str(char *str,unsigned long size,unsigned num){
     return i;
 }
 
-unsigned cmd_str_to_unsigned(const char *str,unsigned long size){
-    unsigned r=0,i=0;
-    while(i<size){
+char *cmd_num_to_str(size_t num,int is_negative){
+    size_t len=0;
+    size_t k=num;
+    do{
+        k/=10;
+        len++;
+    }while(k);
+    len+=(is_negative?1:0);
+    char *ret=malloc(sizeof(char)*(len+1));
+    size_t i=0;
+    if(is_negative){
+        ret[i++]='-';
+    }
+    for(;i<len;i++){
+        ret[len-i-1]=num%10+'0';
+        num/=10;
+    }
+    ret[len]='\0';
+    return ret;
+}
+
+num_t cmd_str_to_num(const char *str){
+    num_t r={};
+    unsigned i=0;
+    if(str[0]=='-'){
+        r.is_negative=1;
+    }
+    while(str[i]){
         if(str[i]<'0'||str[i]>'9'){
-            r=-1;
+            r.unexcepted_char=str[i];
             break;
         }
-        r*=10;
-        r+=str[i]-'0';
+        r.num*=10;
+        r.num=str[i]-'0';
         i++;
     }
     return r;
@@ -1136,7 +1280,10 @@ const char *file_is_exist(const char *file,int type,int is_cmd){
     if(is_file&&!access(file,type)){
         return file;
     }
-    const char *path=get_var("PATH");
+    const char *path=gets_var("PATH");
+    if(!path){
+        return NULL;
+    }
     size_t len=strlen(path);
     for(unsigned i=0;i<=len;i++){
         if(path[i]!=':'&&path[i]!='\0'){
@@ -1228,7 +1375,7 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
     if(p){
         return execve(p,argv,envp);
     }
-    return -1;
+    return -2;
 }
 
 
@@ -1252,7 +1399,9 @@ int set_terminal_echo(int enable){
 
     if(!enable){
         new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
+        #ifdef TERM_TOSTOP
         new_termios.c_lflag|=TOSTOP;
+        #endif
         new_termios.c_cc[VMIN]=1;
         new_termios.c_cc[VTIME]=0;
     }
@@ -1306,6 +1455,7 @@ void child_clear(void){
     }
     da_clear(&job);
     da_clear(&buffer);
+    free(g_argv_var);
 }
 
 
@@ -1340,7 +1490,10 @@ int sh_cd(char *const *argv){
     p=argv[i];
     L:
     if(!argv[i]){
-        p=get_var("HOME");
+        p=gets_var("HOME");
+        if(!p){
+            p="/home";
+        }
     }
 
 
@@ -1395,7 +1548,7 @@ int sh_pwd(char *const *argv){
     }
     L:
     if(l){
-        const char *r=get_var("PWD");
+        const char *r=gets_var("PWD");
         if(!r){
             write(STDERR_FILENO,"pwd: failed\n",12);
             return 1;
