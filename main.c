@@ -42,18 +42,23 @@ char parse_single_quote(da_str *buf,const char *str,size_t *inter);
 char parse_quote(command_t *now,da_str *buf,const char *str,size_t *inter);
 char parse_home(da_str *buf,const char *str,size_t *inter);
 char parse_array(command_var_t *r,const char *str,size_t *inter);
+char parse_cmd_substitution(command_t *now,da_str *buf,const char *str,size_t *inter);
+char parse_substitution_command(command_t *now,da_str *buf,const char *str);
 
-#define IS_PARSED               0b0000001
-#define PARSE_IS_VARIABLE       0b0000010
-#define PARSE_IS_CONTINUE       0b0000100
-#define PARSE_IS_BACKGROUND     0b0001000
-#define PARSE_PARENTHESES_START 0b0010000
-#define PARSE_PARENTHESES_END   0b0100000
-#define PARSE_IS_ARRAY          0b1000000
+#define IS_PARSED               0b00000001
+#define PARSE_IS_VARIABLE       0b00000010
+#define PARSE_IS_CONTINUE       0b00000100
+#define PARSE_IS_BACKGROUND     0b00001000
+#define PARSE_PARENTHESES_START 0b00010000
+#define PARSE_PARENTHESES_END   0b00100000
+#define PARSE_IS_ARRAY          0b01000000
+#define PARSE_SUBPRASE_END      0b10000000
 
 int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter);
 int parse_command(command_t *now,const char *str,size_t *inter,int flg);
-int parse_buffer(void);
+int parse_buffer(da_command *cmds,const char *str,size_t *inter);
+
+int parse_is_continue(da_str *buf);
 
 int execute_command(da_command *p,size_t i);
 
@@ -73,7 +78,7 @@ int main(int argc,char *const *argv,char *const *envi){
     int input_mod=IN_ECHO|IN_HANDLE_CHAR;
 
     if(argc>=2){
-        const char *p=file_is_exist(argv[1],F_OK|X_OK,0);
+        const char *p=file_is_exist(argv[1],F_OK|X_OK,1);
         if(!p){
             write(STDERR_FILENO,argv[1],strlen(argv[1]));
             write(STDERR_FILENO,": command not found\n",20);
@@ -118,6 +123,11 @@ int main(int argc,char *const *argv,char *const *envi){
     const char *psn="PS1";
 
 
+    da_str tmp_buffer;
+    da_init(&tmp_buffer);
+
+    da_command cmds;
+    da_init(&cmds);
 
     while(1){
         deal_jobmsg();
@@ -134,8 +144,9 @@ int main(int argc,char *const *argv,char *const *envi){
 
         deal_jobmsg();
 
-
+        size_t i=0;
         int ret=0;
+
         switch(r){
         case 127:
             return 127;
@@ -146,13 +157,49 @@ int main(int argc,char *const *argv,char *const *envi){
             return 0;
         case 2:
         case 0:
-            ret=parse_buffer();
-            deal_jobmsg();
-            if(ret==1){
-                psn="PS2";
-            }else{
-                psn="PS1";
+            if(!buffer.arr){
+                if(r==2){
+                    return g_ret;
+                }
+                continue;
             }
+
+            if(tmp_buffer.size){
+                da_resize(sizeof(char),&tmp_buffer,tmp_buffer.size+buffer.size);
+                memcpy(tmp_buffer.arr+tmp_buffer.size,buffer.arr,buffer.size);
+                tmp_buffer.size+=buffer.size;
+                da_clear(&buffer);
+                memcpy(&buffer,&tmp_buffer,sizeof(da_str));
+                da_init(&tmp_buffer);
+
+                da_pop(sizeof(char*),&history);
+            }
+            da_add(sizeof(char),&buffer,"");
+            buffer.size--;
+            da_add(sizeof(char*),&history,&buffer.arr);
+            ret=parse_is_continue(&buffer);
+
+            if(ret>0){
+                da_add(sizeof(char),&buffer,"\n");
+                memcpy(&tmp_buffer,&buffer,sizeof(da_str));
+                psn="PS2";
+                if(r==2){
+                    set_terminal_echo(1);
+                    return 0;
+                }
+                continue;
+            }else if(ret<0){
+                i=0;
+                psn="PS1";
+                continue;
+            }
+
+            parse_buffer(&cmds,buffer.arr,&i);
+            deal_jobmsg();
+            da_clear(&cmds);
+            i=0;
+            psn="PS1";
+
             if(r==2){
                 set_terminal_echo(1);
                 return 0;
@@ -213,9 +260,73 @@ int execute_shebang(int fd,char* const* argv){
 }
 
 
+int parse_is_continue(da_str *buf){
+    int quote=0,subparse=0;
+    int parenthese=0,sqr_bracket=0;
+    for(size_t i=0;i<buf->size;i++){
+        switch(buf->arr[i]){
+        case '\"':
+            quote=!quote;
+            break;
+        case '`':
+            subparse=!subparse;
+            break;
+        case '\'':
+            if(quote){
+                break;
+            }
+            i++;
+            for(;i<buf->size;i++){
+                if(buf->arr[i]=='\''){
+                    goto L1;
+                }
+            }
+            return 1;
+        case '(':
+            parenthese++;
+            break;
+        case ')':
+            parenthese--;
+            break;
+        case '[':
+            sqr_bracket++;
+            break;
+        case ']':
+            sqr_bracket--;
+            break;
+        case '\\':
+            i++;
+            break;
+        case '#':
+            goto L2;
+        }
+        L1:;
+    }
+    if(buf->arr[buf->size-1]=='\\'){
+        da_pop(sizeof(char),buf);
+        return 1;
+    }
+    L2:
+    if(sqr_bracket<0||parenthese<0){
+        return -1;
+    }
+    if(sqr_bracket>0||parenthese>0||quote||subparse){
+        return 1;
+    }
+    return 0;
+}
+
+
 int quote_flg=0;
+int cmd_substitution_cnt=0;
 
 char parse_variable(command_t *now,da_str *buf,const char *str,size_t *inter){
+    if(str[*inter+1]=='('){
+        (*inter)+=2;
+        cmd_substitution_cnt++;
+        return parse_cmd_substitution(now,buf,str,inter);
+    }
+
     size_t i=*inter;
 
     da_str tmp;
@@ -360,8 +471,12 @@ char parse_quote(command_t *now,da_str *buf,const char *str,size_t *inter){
     while(str[i]!='\0'&&str[i]!='\"'){
         switch(str[i]){
         case '$':
-            *inter=i;
-            parse_variable(now,buf,str,inter);
+            parse_variable(now,buf,str,&i);
+            break;
+        case '`':
+            cmd_substitution_cnt++;
+            i++;
+            parse_cmd_substitution(now,buf,str,&i);
             break;
         case '\\':
             if(!IS_LEGAL(str[i])){
@@ -469,6 +584,92 @@ char parse_array(command_var_t *r,const char *str,size_t *inter){
     return 0;
 }
 
+char parse_cmd_substitution(command_t *now,da_str *buf,const char *str,size_t *inter){
+    int pipes[2]={-1,-1};
+    int savefd=-1;
+    if(pipe(pipes)){
+        return 0;
+    }
+    savefd=dup(STDOUT_FILENO);
+    
+    dup2(pipes[1],STDOUT_FILENO);
+    is_script=1;
+
+    da_command cmds;
+    da_init(&cmds);
+
+    parse_buffer(&cmds,str,inter);
+    da_clear(&cmds);
+
+    dup2(savefd,STDOUT_FILENO);
+    close(savefd);
+    close(pipes[1]);
+    pipes[1]=-1;
+    savefd=-1;
+
+    char c;
+    da_str *bufp=buf;
+    if(!quote_flg){
+        bufp=malloc(sizeof(da_str));
+        da_init(bufp);
+    }
+    while(read(pipes[0],&c,sizeof(char))){
+        da_add(sizeof(char),bufp,&c);
+    }
+    if(bufp->size&&(bufp->arr[bufp->size-1]=='\n'||bufp->arr[bufp->size-1]==' ')){
+        da_pop(sizeof(char),bufp);
+    }
+
+    is_script=0;
+    close(pipes[0]);
+    pipes[0]=-1;
+
+    if(quote_flg){
+        goto RET;
+    }
+
+    da_add(sizeof(char),bufp,"");
+    parse_substitution_command(now,buf,bufp->arr);
+    da_clear(bufp);
+
+    RET:
+    cmd_substitution_cnt--;
+
+    return 0;
+}
+
+char parse_substitution_command(command_t *now,da_str *buf,const char *str){
+    size_t i=0;
+    while(str[i]==' '||str[i]=='\n'){
+        i++;
+    }
+    while(str[i]){
+        switch(str[i]){
+        case '$':
+            parse_variable(now,buf,str,&i);
+            break;
+        case '`':
+            cmd_substitution_cnt++;
+            i++;
+            parse_cmd_substitution(now,buf,str,&i);
+            break;
+        case ' ':
+        case '\n':
+            da_add(sizeof(char),buf," ");
+            i++;
+            while(str[i]==' '||str[i]=='\n'){
+                i++;
+            }
+            break;
+        default:
+            da_add(sizeof(char),buf,&str[i]);
+            i++;
+            break;
+        }
+    }
+    return 0;
+}
+
 int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
     size_t i=*inter;
     while(str[i]==' '){
@@ -484,7 +685,6 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
     command_var_t array={.type=CMD_VAR,.umask=VAR_ARRAY,.var=NULL};
 
     while(str[i]!='\0'&&str[i]!=' '){
-        char r=0;
         size_t j=0;
         switch(str[i]){
         case ';':
@@ -539,15 +739,15 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
             break;
         case '$':
             ret|=IS_PARSED;
-            r=parse_variable(now,buf,str,&i);
+            parse_variable(now,buf,str,&i);
             break;
         case '\'':
             ret|=IS_PARSED;
-            r=parse_single_quote(buf,str,&i);
+            parse_single_quote(buf,str,&i);
             break;
         case '\"':
             ret|=IS_PARSED;
-            r=parse_quote(now,buf,str,&i);
+            parse_quote(now,buf,str,&i);
             break;
         case '(':
             if(ret&PARSE_IS_VARIABLE&&buf->arr[buf->size-1]=='='){
@@ -559,13 +759,28 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
                 *inter=i;
                 return ret;
             }
+            i++;
             ret|=PARSE_PARENTHESES_START;
             break;
         case ')':
             ret|=PARSE_PARENTHESES_END;
+            if(cmd_substitution_cnt){
+                ret|=PARSE_SUBPRASE_END;
+            }
             i++;
             *inter=i;
             return ret;
+        case '`':
+            ret|=IS_PARSED;
+            i++;
+            if(cmd_substitution_cnt){
+                *inter=i;
+                ret|=PARSE_SUBPRASE_END;
+                return ret;
+            }
+            cmd_substitution_cnt++;
+            parse_cmd_substitution(now,buf,str,&i);
+            break;
         case '=':
             if(!(ret&IS_PARSED)){
                 ret|=PARSE_IS_VARIABLE;
@@ -576,7 +791,7 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
         case '~':
             if((!i||(ret&PARSE_IS_VARIABLE&&str[i-1]=='=')||str[i-1]==' ')&&(!str[i+1]||str[i+1]=='/'||str[i+1]==' ')){
                 ret|=IS_PARSED;
-                r=parse_home(buf,str,&i);
+                parse_home(buf,str,&i);
                 break;
             }
             da_add(sizeof(char),buf,&str[i]);
@@ -584,10 +799,6 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
             break;
         case '\\':
             i++;
-            if(str[i]=='\0'){
-                r='\n';
-                break;
-            }
             ret|=IS_PARSED;
             da_add(sizeof(char),buf,&str[i]);
             i++;
@@ -597,11 +808,6 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
             i++;
             break;
         }
-        if(r){
-            ret|=PARSE_IS_CONTINUE;
-            ret|=r<<8;
-            break;
-        }
     }
     *inter=i;
 
@@ -609,29 +815,15 @@ int parse_item(command_t *now,da_str *buf,const char *str,size_t *inter){
 }
 
 int parse_command(command_t *now,const char *str,size_t *inter,int flg){
-    static da_str tmp_item;
-
     int is_parsing_item=0,is_first_item=1;
     static int last_is_pipe=0;
     static command_redir_t redirector;
 
     while(str[*inter]!='\0'){
         da_str buf;
-        if(tmp_item.size){
-            memcpy(&buf,&tmp_item,sizeof(da_str));
-            memset(&tmp_item,0,sizeof(da_str));
-        }else{
-            da_init(&buf);
-        }
+        da_init(&buf);
         
         int r=parse_item(now,&buf,str,inter);
-        if(r&PARSE_IS_CONTINUE){
-            if(quote_flg){
-                da_add(sizeof(char),&buf,"\n");
-            }
-            memcpy(&tmp_item,&buf,sizeof(da_str));
-            return r;
-        }
         if(!buf.size){
             break;
         }
@@ -715,6 +907,11 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
             is_first_item=0;
             cm_add_item(now,buf.arr);
         }
+
+        if(r&PARSE_SUBPRASE_END){
+            cm_add_item(now,NULL);
+            return r;
+        }
     }
     if(last_is_pipe){
         int tp=CMD_PIPE_END;
@@ -725,88 +922,68 @@ int parse_command(command_t *now,const char *str,size_t *inter,int flg){
     return 0;
 }
 
-int parse_buffer(void){
-    static da_command commands;
-    static command_t cmd;
-
-    static char *tmp_buffer;
-    static size_t tmp_buffer_size;
-
-    if(!buffer.arr){
-        return 0;
+int parse_buffer(da_command *cmds,const char *str,size_t *inter){
+    command_t cmd;
+    if(cmds->size){
+        cmd=cmds->arr[cmds->size-1];
+        da_pop(sizeof(command_t),&cmds);
+    }else{
+        cm_init(&cmd);
     }
-
-    size_t i=0;
-    while(buffer.arr[i]==' '){
+    
+    size_t i=*inter;
+    while(str[i]==' '){
         i++;
     }
-    if(i>=buffer.size){
+    if(str[i]=='\0'){
         return 0;
     }
-
-    if(tmp_buffer_size){
-        da_pop(sizeof(char*),&history);
-    }
-
-    da_add(sizeof(char),&buffer,"");
-    tmp_buffer=realloc(tmp_buffer,sizeof(char)*(tmp_buffer_size+buffer.size));
-    memcpy(tmp_buffer+tmp_buffer_size,buffer.arr,sizeof(char)*buffer.size);
-    buffer.size--;
-    tmp_buffer_size+=buffer.size;
 
     int ret=0;
     size_t last_bg_loc=0;
     size_t j=0;
-    while(i<buffer.size){
-        ret=parse_command(&cmd,buffer.arr,&i,0);
-        if(ret&PARSE_IS_CONTINUE){
-            if(quote_flg){
-                tmp_buffer=realloc(tmp_buffer,sizeof(char)*(tmp_buffer_size+2));
-                tmp_buffer[tmp_buffer_size++]='\n';
-                tmp_buffer[tmp_buffer_size]='\0';
-            }else{
-                tmp_buffer[--tmp_buffer_size]='\0';
-            }
-            da_add(sizeof(char*),&history,&tmp_buffer);
-            return 1;
+    while(str[i]!='\0'){
+        ret=parse_command(&cmd,str,&i,0);
+        da_add(sizeof(command_t),cmds,&cmd);
+        if(ret&PARSE_PARENTHESES_END){
+            break;
         }
-        da_add(sizeof(command_t),&commands,&cmd);
         if(ret&PARSE_IS_BACKGROUND){
             int tp=CMD_BG;
-            cm_add_cmd(&commands.arr[last_bg_loc],&tp,sizeof(tp));
+            cm_add_cmd(&cmds->arr[last_bg_loc],&tp,sizeof(tp));
             last_bg_loc=j+1;
         }
         cm_init(&cmd);
         j++;
+        if(ret&PARSE_SUBPRASE_END){
+            break;
+        }
     }
 
-    da_add(sizeof(char*),&history,&tmp_buffer);
-
-    da_clear(&buffer);
-
-    if(tmp_buffer_size){
-        tmp_buffer=NULL;
-        tmp_buffer_size=0;
-    }
 
     set_terminal_echo(1);
-    now_name=restore_cmd(commands.arr,commands.size);
-    for(size_t i=0;i<commands.size;i++){
-        command_t *p=&commands.arr[i];
+    now_name=restore_cmd(cmds->arr,cmds->size);
+    for(size_t i=0;i<cmds->size;i++){
+        command_t *p=&cmds->arr[i];
         if(p->argvn){
-            execute_command(&commands,i);
+            execute_command(cmds,i);
         }
         for(size_t j=0;j<p->argvn;j++){
             free(p->argv[j]);
         }
-        cm_clear(&commands.arr[i]);
+        cm_clear(&cmds->arr[i]);
     }
+    
     free(now_name);
-    da_fake_clear(&commands);
     if(is_child){
         exit(g_ret);
     }
     set_terminal_echo(0);
+
+    if(ret&PARSE_SUBPRASE_END){
+        *inter=i;
+        return 2;
+    }
 
     return 0;
 }

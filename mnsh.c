@@ -59,7 +59,7 @@ int input_basic(void){
         c=getc(stdin);
         if(c=='\n'){
             return 0;
-        }else if(c=='\0'||c==-1){
+        }else if(c==EOF){
             if(!is_script){
                 return -1;
             }
