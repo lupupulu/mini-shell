@@ -9,6 +9,8 @@
 #include <locale.h>
 #include <wchar.h>
 
+#define output(s,l) if(is_script)write(STDOUT_FILENO,s,l)
+
 int g_argc;
 char* const* g_argv;
 void *g_argv_var;
@@ -21,14 +23,6 @@ char *now_name;
 int is_script;
 int is_child;
 
-int now_is_bufffer=1;
-int echo=1;
-da_str buffer;
-
-size_t pos;
-
-da_history history;
-size_t history_pos;
 
 da_variable variable;
 da_env env;
@@ -42,480 +36,42 @@ size_t jobmsgsiz;
 
 char pathbuf[PATH_BUF_SIZE];
 char pwd_pathbuf[PATH_BUF_SIZE];
-char echobuf[ECHO_BUF_SIZE];
-size_t echobufsiz;
 
-#define output(s,l) if(echo)write(STDOUT_FILENO,s,l)
-void insert(const char *c,unsigned len);
-void clean_show(size_t tpos);
-void to_pos(size_t tpos);
+da_builtincmd builtincmd={
+    .arr=(builtincmd_t[]){
+        {.key="alias",.f=sh_alias},
+        {.key="bg",.f=sh_bg},
+        {.key="cd",.f=sh_cd},
+        {.key="command",.f=sh_command},
+        {.key="echo",.f=sh_echo},
+        {.key="eval",.f=sh_eval},
+        {.key="exec",.f=sh_exec},
+        {.key="export",.f=sh_export},
+        {.key="false",.f=sh_false},
+        {.key="fg",.f=sh_fg},
+        {.key="getopts",.f=sh_getopts},
+        {.key="history",.f=sh_history},
+        {.key="jobs",.f=sh_jobs},
+        {.key="pwd",.f=sh_pwd},
+        {.key="read",.f=sh_read},
+        {.key="readonly",.f=sh_readonly},
+        {.key="set",.f=sh_set},
+        {.key="shift",.f=sh_shift},
+        {.key="test",.f=sh_test},
+        {.key="times",.f=sh_times},
+        {.key="trap",.f=sh_trap},
+        {.key="true",.f=sh_true},
+        {.key="type",.f=sh_type},
+        {.key="umask",.f=sh_umask},
+        {.key="unalias",.f=sh_unalias},
+        {.key="unset",.f=sh_unset},
+        {.key="wait",.f=sh_wait}
+    },
+    .size=27,
+    .real=27
+};
+
 inline static void deal_job_status(job_t *job,int status);
-
-int deal_keys(unsigned char c);
-
-int input_basic(void){
-    int c=0;
-    while(1){
-        c=getc(stdin);
-        if(c=='\n'){
-            return 0;
-        }else if(c==EOF){
-            if(!is_script){
-                return -1;
-            }
-            return 2;
-        }
-        int tc=c;
-        while(tc){
-            da_add(sizeof(char),&buffer,&tc);
-            tc>>=8;
-        }
-    }
-    return -1;
-}
-int input(unsigned umask){
-    if(is_script){
-        return input_basic();
-    }
-    int ret=0;
-    char c;
-    char buf[8];
-    pos=0;
-
-    history_pos=history.size;
-
-    echo=umask&IN_ECHO;
-
-    while(1){
-        ret=read(STDIN_FILENO,&c,1);
-        if(ret==-1){
-            continue;
-        }
-        if(c==0x04||ret==0){
-            if(!is_script){
-                return -1;
-            }
-            return 2;
-        }
-
-        if(c=='\n'){
-            if(!is_script){
-                echo_to_buf("\n",1);
-                echo_buf_to_fd(STDOUT_FILENO);
-            }
-            if(!now_is_bufffer){
-                free(history.arr[history.size-1]);
-                da_pop(sizeof(char*),&history);
-            }
-            now_is_bufffer=1;
-            return 0;
-        }else if(deal_keys(c)==-1){
-            memset(buf,0,sizeof(buf));
-            buf[0]=c;
-            size_t i=1;
-            while((ret=get_char_len(buf))<0){
-                read(STDIN_FILENO,&c,1);
-                buf[i++]=c;
-            }
-            insert(buf,ret);
-        }
-    }
-    return 0;
-}
-
-
-#define STD_RET(v) \
-    ((unsigned)(v)>127?(127):(v))
-
-int deal_keys(unsigned char c){
-    int ret=0;
-    if(c>=0&&!key_config[c].func){
-        if(c<32||c==127){
-            return 0;
-        }
-        return -1;
-    }
-    if(!key_config[c].esc){
-        ret=key_config[c].func();
-        return STD_RET(ret);
-    }
-
-    char buf[16]={},esc[16]={c};
-    size_t cnt=0,siz=0;
-    key_setting_list_t *now=&key_config[c];
-
-    while(now!=&key_config_list[0]){
-        while(cnt<now->len){
-            ret=read(STDIN_FILENO,&c,1);
-            if(!ret){
-                insert(esc,siz);
-                return 127;
-            }
-            buf[cnt++]=c;
-            if(IS_SHOWN(c)){
-                esc[siz++]=c;
-            }
-        }
-        if(now->esc&&!strcmp(buf,now->esc)){
-            ret=now->func();
-            return STD_RET(ret);
-        }
-        now=&key_config_list[now->next];
-    }
-    insert(esc,siz);
-    return 127;
-}
-
-
-size_t next_char(const char *str,size_t pos,size_t size){
-    wchar_t wc;
-    int r=mbtowc(&wc,str+pos,MB_CUR_MAX);
-    if(r<=0){
-        return pos;
-    }
-    return pos+r;
-}
-
-size_t last_char(const char *str,size_t pos){
-    if(!pos){
-        return 0;
-    }
-    wchar_t wc;
-    size_t i=1;
-    while(pos-i&&mbtowc(&wc,str+pos-i,MB_CUR_MAX)<0){
-        i++;
-    }
-    return pos-i;
-}
-
-size_t get_char_width(const char *c){
-    wchar_t wc;
-    int r=mbtowc(&wc,c,MB_CUR_MAX);
-    if(r<0){
-        return 0;
-    }
-    return wcwidth(wc);
-}
-
-size_t get_char_len(const char *c){
-    wchar_t wc;
-    int r=mbtowc(&wc,c,MB_CUR_MAX);
-    return r;
-}
-
-
-void insert(const char *c,unsigned len){
-    if(buffer.size+len>=buffer.real){
-        da_resize(sizeof(char),&buffer,buffer.size+len+1);
-    }
-    memmove(buffer.arr+pos+len,buffer.arr+pos,buffer.size-pos);
-    memcpy(buffer.arr+pos,c,len);
-    buffer.size+=len;
-    size_t i=0;
-    output(buffer.arr+pos,buffer.size-pos);
-    size_t dpos=pos;
-    while(i<len){
-        dpos=next_char(buffer.arr,dpos,buffer.size);
-        i+=get_char_len(&c[i]);
-    }
-    pos=buffer.size;
-    to_pos(dpos);
-}
-
-void clean_show(size_t tpos){
-    size_t dpos=pos;
-    size_t cnt=0,width=0;
-    while(dpos<buffer.size){
-        width=get_char_width(&buffer.arr[dpos]);
-        echo_to_buf("  ",width);
-        dpos=next_char(buffer.arr,dpos,buffer.size);
-        cnt+=width;
-    }
-    while(cnt){
-        echo_to_buf("\b",1);
-        cnt--;
-    }
-    if(tpos<pos){
-        dpos=pos;
-        if(dpos==buffer.size){
-            echo_to_buf("\b \b",3);
-            dpos=last_char(buffer.arr,dpos);
-        }
-        while(dpos>tpos){
-            width=get_char_width(&buffer.arr[dpos]);
-            echo_to_buf("\b\b",width);
-            echo_to_buf("  ",width);
-            echo_to_buf("\b\b",width);
-            dpos=last_char(buffer.arr,dpos);
-        }
-        pos=tpos;
-    }
-    echo_buf_to_fd(STDOUT_FILENO);
-
-}
-
-void to_pos(size_t tpos){
-    size_t dpos=pos;
-    if(tpos>pos){
-        while(dpos<tpos){
-            echo_to_buf("\033[C\033[C",3*get_char_width(&buffer.arr[dpos]));
-            dpos=next_char(buffer.arr,dpos,buffer.size);
-        }
-    }else if(tpos<pos){
-        while(dpos>tpos){
-            dpos=last_char(buffer.arr,dpos);
-            echo_to_buf("\033[D\033[D",3*get_char_width(&buffer.arr[dpos]));
-        }
-    }
-    pos=dpos;
-    echo_buf_to_fd(STDOUT_FILENO);
-}
-
-void echo_unsigned_to_buf(size_t num){
-    if(!echo){
-        return ;
-    }
-    static char tmp[MAX_LL_SIZE];
-    unsigned l=cmd_unsigned_to_str(tmp,MAX_LL_SIZE,num);
-    echo_to_buf(tmp,l);
-}
-
-void echo_to_buf(const char *str,size_t size){
-    if(!echo){
-        return ;
-    }
-
-    if(size>ECHO_BUF_SIZE){
-        echo_buf_to_fd(STDOUT_FILENO);
-        write(STDOUT_FILENO,str,size);
-    }else if(echobufsiz+size>=ECHO_BUF_SIZE){
-        echo_buf_to_fd(STDOUT_FILENO);
-        memcpy(echobuf,str,size);
-        echobufsiz+=size;
-    }else{
-        memcpy(echobuf+echobufsiz,str,size);
-        echobufsiz+=size;
-    }
-}
-
-void echo_buf_to_fd(int fd){
-    if(!echo){
-        return ;
-    }
-
-    write(STDOUT_FILENO,echobuf,echobufsiz);
-    echobufsiz=0;
-}
-
-
-int backspace(void){
-    if(!pos){
-        return 0;
-    }
-    size_t dpos=last_char(buffer.arr,pos),opos=pos;
-    to_pos(dpos);
-    clean_show(pos);
-    memmove(buffer.arr+dpos,buffer.arr+opos,buffer.size-opos);
-    for(int i=0;i<opos-dpos;i++){
-        da_pop(sizeof(char),&buffer);
-    }
-    output(buffer.arr+pos,buffer.size-pos);
-    pos=buffer.size;
-    to_pos(dpos);
-    return 0;
-}
-
-int delete(void){
-    if(pos>=buffer.size){
-        return 0;
-    }
-
-    size_t dpos=next_char(buffer.arr,pos,buffer.size);
-    if(pos==buffer.size-1){
-        clean_show(pos);
-        for(int i=0;i<dpos-pos;i++){
-            da_pop(sizeof(char),&buffer);
-        }
-        return 0;
-    }
-
-    clean_show(pos);
-    memmove(buffer.arr+pos,buffer.arr+dpos,buffer.size-dpos);
-    for(int i=0;i<dpos-pos;i++){
-        da_pop(sizeof(char),&buffer);
-    }
-
-    output(buffer.arr+pos,buffer.size-pos);
-
-    dpos=pos;
-    pos=buffer.size;
-    to_pos(dpos);
-
-    return 0;
-}
-
-int left(void){
-    if(!pos){
-        return 0;
-    }
-    size_t dpos=last_char(buffer.arr,pos);
-    output("\033[D\033[D",3*get_char_width(&buffer.arr[dpos]));
-    pos=dpos;
-    return 0;
-}
-
-int right(void){
-    if(pos>=buffer.size){
-        return 0;
-    }
-    size_t dpos=next_char(buffer.arr,pos,buffer.size);
-    output("\033[C\033[C",3*get_char_width(&buffer.arr[pos]));
-    pos=dpos;
-    return 0;
-}
-
-int to_start(void){
-    to_pos(0);
-    return 0;
-}
-
-int to_end(void){
-    to_pos(buffer.size);
-    return 0;
-}
-
-int last_word(void){
-    if(!pos){
-        return 0;
-    }
-    size_t dpos=last_char(buffer.arr,pos);
-    int legal=IS_LEGAL(buffer.arr[dpos]);
-    if(!legal){
-        while(dpos&&!IS_LEGAL(buffer.arr[dpos])){
-            dpos=last_char(buffer.arr,dpos);
-        }
-    }
-    while(dpos&&IS_LEGAL(buffer.arr[dpos])){
-        dpos=last_char(buffer.arr,dpos);
-    }
-    if(!IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos,buffer.size);
-    }
-    to_pos(dpos);
-    return 0;
-}
-
-int next_word(void){
-    if(pos>=buffer.size){
-        return 0;
-    }
-    int legal=IS_LEGAL(buffer.arr[pos]);
-    size_t dpos=pos;
-    if(!legal){
-        while(dpos<buffer.size&&!IS_LEGAL(buffer.arr[dpos])){
-            dpos=next_char(buffer.arr,dpos,buffer.size);
-        }
-    }
-    while(dpos<buffer.size&&IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos,buffer.size);
-    }
-    to_pos(dpos);
-    return 0;
-}
-
-int clear_left(void){
-    while(pos){
-        backspace();
-    }
-    return 0;
-}
-
-int clear_right(void){
-    while(pos!=buffer.size){
-        delete();
-    }
-    return 0;
-}
-
-int clear_last_word(void){
-    if(!pos){
-        return 0;
-    }
-    size_t dpos=last_char(buffer.arr,pos);
-    int legal=IS_LEGAL(buffer.arr[dpos]);
-    if(!legal){
-        while(dpos&&!IS_LEGAL(buffer.arr[dpos])){
-            dpos=last_char(buffer.arr,dpos);
-        }
-    }
-    while(dpos&&IS_LEGAL(buffer.arr[dpos])){
-        dpos=last_char(buffer.arr,dpos);
-    }
-    if(!IS_LEGAL(buffer.arr[dpos])){
-        dpos=next_char(buffer.arr,dpos,buffer.size);
-    }
-    size_t opos=pos;
-    to_pos(dpos);
-    clean_show(pos);
-    memmove(buffer.arr+dpos,buffer.arr+opos,buffer.size-opos);
-    for(size_t i=0;i<opos-dpos;i++){
-        da_pop(sizeof(char),&buffer);
-    }
-    output(buffer.arr,buffer.size-pos);
-    pos=buffer.size;
-    to_pos(dpos);
-    return 0;
-}
-
-int last_history(void){
-    if(!history_pos){
-        return 0;
-    }
-
-    clean_show(0);
-
-    if(now_is_bufffer){
-        char *p=malloc(sizeof(char)*(buffer.size+1));
-        memcpy(p,buffer.arr,buffer.size);
-        p[buffer.size]='\0';
-        da_add(sizeof(char*),&history,&p);
-        now_is_bufffer=0;
-    }
-    history_pos--;
-    da_clear(&buffer);
-    buffer.size=strlen(history.arr[history_pos]);
-    buffer.arr=malloc(buffer.size);
-    memcpy(buffer.arr,history.arr[history_pos],buffer.size);
-    buffer.real=buffer.size;
-    pos=buffer.size;
-
-    output(buffer.arr,buffer.size);
-    return 0;
-}
-
-int next_history(void){
-    if(!history.size||history_pos>=history.size-1){
-        return 0;
-    }
-
-    clean_show(0);
-
-    history_pos++;
-    da_clear(&buffer);
-    buffer.size=strlen(history.arr[history_pos]);
-    buffer.arr=malloc(buffer.size);
-    memcpy(buffer.arr,history.arr[history_pos],buffer.size);
-    buffer.real=buffer.size;
-    pos=buffer.size;
-    if(history_pos==history.size-1){
-        free(history.arr[history.size-1]);
-        da_pop(sizeof(char*),&history);
-        now_is_bufffer=1;
-    }
-
-    output(buffer.arr,buffer.size);
-    return 0;
-}
 
 
 int cm_init(command_t *cm){
@@ -1379,39 +935,6 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]){
 }
 
 
-int set_terminal_echo(int enable){
-    if(is_script||is_child){
-        return 0;
-    }
-
-    static struct termios original_termios;
-    static int is_saved=0;
-    struct termios new_termios;
-
-    if(!is_saved){
-        if(tcgetattr(STDIN_FILENO,&original_termios)==-1){
-            return 1;
-        }
-        is_saved=1;
-    }
-
-    new_termios=original_termios;
-
-    if(!enable){
-        new_termios.c_lflag&=~(ECHO|ICANON|ECHOE|ECHOK|ECHONL);
-        #ifdef TERM_TOSTOP
-        new_termios.c_lflag|=TOSTOP;
-        #endif
-        new_termios.c_cc[VMIN]=1;
-        new_termios.c_cc[VTIME]=0;
-    }
-
-    if(tcsetattr(STDIN_FILENO,TCSANOW,&new_termios)==-1){
-        return 1;
-    }
-
-    return 0;
-}
 
 void set_signal_handler(int enable){
     if(is_script){
@@ -1446,15 +969,10 @@ void set_signal_handler(int enable){
 }
 
 void child_clear(void){
-    for(size_t i=0;i<history.size;i++){
-        free(history.arr[i]);
-    }
-    da_clear(&history);
     for(size_t i=0;i<job.size;i++){
         free(job.arr[i].name);
     }
     da_clear(&job);
-    da_clear(&buffer);
     free(g_argv_var);
 }
 
@@ -1662,23 +1180,24 @@ int sh_read(char *const *argv){
     if(!argv[1]){
         return 127;
     }
-    int umask=IN_ECHO|IN_HANDLE_CHAR;
+    int umask=0;
     int i=1;
     const char *var=NULL;
+    const char *echobuf=NULL;
     while(argv[i]){
         if(argv[i][0]=='-'){
             switch(argv[i][1]){
             case 's':
-                umask&=~IN_ECHO;
+                umask|=IN_NO_ECHO;
                 break;
             case 'r':
-                umask&=~IN_HANDLE_CHAR;
+                umask|=IN_NO_HANDLE_CHAR;
                 break;
             case 'p':
                 if(!argv[i+1]||argv[i+1][0]=='-'){
                     return 127;
                 }
-                write(STDOUT_FILENO,argv[i+1],strlen(argv[i+1]));
+                echobuf=argv[i+1];
                 i++;
                 break;
             default:
@@ -1694,7 +1213,9 @@ int sh_read(char *const *argv){
     }
 
     da_fake_clear(&buffer);
-    int r=input(umask);
+    input_set_mode(umask);
+    int r=input(echobuf);
+    input_set_mode(0);
     if(r){
         return 127;
     }
@@ -1855,7 +1376,6 @@ int sh_exec(char *const *argv){
     if(!argv[1]){
         return 1;
     }
-    set_terminal_echo(1);
     cmd_execvpe(argv[1],&argv[1],env.arr);
     write(STDERR_FILENO,argv[1],strlen(argv[1]));
     write(STDERR_FILENO,": command not found\n",20);

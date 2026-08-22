@@ -20,24 +20,14 @@
 #define IS_SHOWN(c) \
     (((c)>=0x20&&(c)<=127)||((c)<0))
 
+#define STD_RET(v) \
+    ((unsigned)(v)>127?(127):(v))
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 
-#define darray_t(Tp) \
-struct{\
-    Tp *arr;\
-    size_t size,real;\
-}
-
-int da_init(void *array);
-int da_add(size_t tp_size,void *array,const void *buf);
-int da_add_loc(size_t tp_size,void *array,const void *buf,size_t i);
-int da_del(size_t tp_size,void *array,size_t i);
-int da_resize(size_t tp_size,void *array,size_t size);
-int da_fake_pop(size_t tp_size,void *array);
-int da_pop(size_t tp_size,void *array);
-int da_fake_clear(void *array);
-int da_clear(void *array);
+#include "CDS/darray.h"
+#include "CDS/confc.h"
+#include "CDS/input.h"
 
 #define strpair_t(...) struct{char *key;__VA_ARGS__}
 #define strarray_t(pair) darray_t(pair)
@@ -61,15 +51,10 @@ extern char *now_name;
 extern int is_script;
 extern int is_child;
 
-int set_terminal_echo(int enable);
 void set_signal_handler(int enable);
 void child_clear(void);
 
 
-size_t next_char(const char *str,size_t pos,size_t size);
-size_t last_char(const char *str,size_t pos);
-size_t get_char_width(const char *c);
-size_t get_char_len(const char *c);
 
 #define ECHO_BUF_SIZE 256
 void echo_unsigned_to_buf(size_t num);
@@ -85,28 +70,10 @@ int cmd_execvpe(const char *file, char *const argv[],char *const envp[]);
 const char *file_is_exist(const char *file,int type,int is_cmd);
 int is_variable(const char *cmd);
 
-#define UTF8_4_CHECK_UMASK 0b11111000
-#define UTF8_4_UMASK       0b11110000
-#define UTF8_3_CHECK_UMASK 0b11110000
-#define UTF8_3_UMASK       0b11100000
-#define UTF8_2_CHECK_UMASK 0b11100000
-#define UTF8_2_UMASK       0b11000000
-#define UTF8_1_CHECK_UMASK 0b11000000
-#define UTF8_1_UMASK       0b10000000
-#define UTF8_CHECK(c,n) (((c)&UTF8_##n##_CHECK_UMASK)==UTF8_##n##_UMASK)
+int parse_check(const char *buf);
+
 
 typedef darray_t(char) da_str;
-extern da_str buffer;
-typedef darray_t(char*) da_history;
-extern da_history history;
-extern size_t history_pos;
-
-// int delete_history();
-
-#define IN_ECHO        0b01
-#define IN_HANDLE_CHAR 0b10
-int input_basic(void);
-int input(unsigned umask);
 
 #define REDIR_IN              1
 #define REDIR_OUT             2
@@ -118,39 +85,39 @@ int input(unsigned umask);
 int is_redirector(const char *cmd,size_t *inter,int *a);
 
 
-#define CMD_PIPE  2
-#define CMD_REDIR 3
-#define CMD_BG    4
-#define CMD_AND   5
-#define CMD_OR    6
-#define CMD_VAR      -1
-#define CMD_PIPE_END -2
-#define CMD_BG_END   -4
+// #define CMD_PIPE  2
+// #define CMD_REDIR 3
+// #define CMD_BG    4
+// #define CMD_AND   5
+// #define CMD_OR    6
+// #define CMD_VAR      -1
+// #define CMD_PIPE_END -2
+// #define CMD_BG_END   -4
 
-typedef struct {
-    int type;
-    int op;
-    int _1;
-    char *_2;
-}command_redir_t;
-typedef struct {
-    int type;
-    unsigned umask;
-    char *var;
-}command_var_t;
+// typedef struct {
+//     int type;
+//     int op;
+//     int _1;
+//     char *_2;
+// }command_redir_t;
+// typedef struct {
+//     int type;
+//     unsigned umask;
+//     char *var;
+// }command_var_t;
 
-typedef struct {
-    char **argv;
-    int **cmds;
-    size_t argvn;
-    size_t cmdsn;
-}command_t;
-typedef darray_t(command_t) da_command;
+// typedef struct {
+//     char **argv;
+//     int **cmds;
+//     size_t argvn;
+//     size_t cmdsn;
+// }command_t;
+// typedef darray_t(command_t) da_command;
 
-int cm_init(command_t *cm);
-int cm_add_item(command_t *cm,char *item);
-int cm_add_cmd(command_t *cm,void *v,size_t size);
-int cm_clear(command_t *cm);
+// int cm_init(command_t *cm);
+// int cm_add_item(command_t *cm,char *item);
+// int cm_add_cmd(command_t *cm,void *v,size_t size);
+// int cm_clear(command_t *cm);
 
 
 typedef int(*command_func)(char *const *);
@@ -159,7 +126,6 @@ typedef struct {
     command_func f;
 }builtincmd_t;
 typedef darray_t(builtincmd_t) da_builtincmd;
-extern builtincmd_t builtincmd_arr[];
 extern da_builtincmd builtincmd;
 command_func get_builtin_cmd(const char *cmd);
 
@@ -176,13 +142,13 @@ typedef darray_t(char*) da_env;
 extern da_env env;
 
 
-#define var_arr_t(Tp) struct{size_t size;Tp data[0];}
-#define VAR_ARR_SIZE(Tp,arr) (sizeof(var_arr_t(Tp))+arr->size*sizeof(Tp))
-typedef long var_int_t;
-typedef struct {
-    command_t *value;
-    size_t size;
-}var_func_t;
+// #define var_arr_t(Tp) struct{size_t size;Tp data[0];}
+// #define VAR_ARR_SIZE(Tp,arr) (sizeof(var_arr_t(Tp))+arr->size*sizeof(Tp))
+// typedef long var_int_t;
+// typedef struct {
+//     command_t *value;
+//     size_t size;
+// }var_func_t;
 
 typedef struct {
     void *value;
@@ -241,8 +207,8 @@ size_t find_job_num(size_t num);
 size_t get_job_num(const char *str);
 int del_job_pid(int pid);
 
-void restore_cmd_redir(da_str *str,command_redir_t *r);
-char *restore_cmd(command_t *cmds,size_t size);
+// void restore_cmd_redir(da_str *str,command_redir_t *r);
+// char *restore_cmd(command_t *cmds,size_t size);
 
 typedef struct {
     int pid;
@@ -300,38 +266,5 @@ int sh_type(char *const *argv);
 
 
 
-typedef int(*key_func)(void);
-
-int last_history(void);
-int next_history(void);
-int left(void);
-int right(void);
-int to_start(void);
-int to_end(void);
-int last_word(void);
-int next_word(void);
-int backspace(void);
-int delete(void);
-int clear_left(void);
-int clear_right(void);
-int clear_last_word(void);
-
-typedef struct {
-    char key;
-    const char *esc; // pls ensure that the length of this value is <= 16
-    const char *func;
-}key_setting_t;
-
-typedef struct {
-    unsigned next;
-    unsigned len;
-    const char *esc;
-    key_func func;
-}key_setting_list_t;
-
-#define CHAR_MAX 256
-
-extern key_setting_list_t key_config[CHAR_MAX];
-extern key_setting_list_t key_config_list[];
 
 #endif

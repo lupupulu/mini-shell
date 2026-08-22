@@ -14,27 +14,32 @@ RELEASE =
 DEBUG =
 endif
 
-ALL: mnsh
+ALL: nmsh mnsh echokey
 
-mnsh: main.c config.c mnsh.o darray.o
-	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
-
-config.c: init config.h
-	./init
-
-init: init.c darray.o
+mnsh: main.c mnsh.o confc.o darray.o input.o
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
 mnsh.o: mnsh.c mnsh.h
 	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
 
-darray.o: darray.c mnsh.h
+confc.o: CDS/confc.c
 	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
+
+darray.o: CDS/darray.c
+	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
+
+input.o: CDS/input.c
+	$(CC) -c $(DEBUG) $(CFLAG) $< -o $@
+
+
+nmsh: mini-shell.c
+	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $< -o $@
 
 echokey: echokey.c
 	$(CC) $(RELEASE) $(DEBUG) $(CFLAG) $^ -o $@
 
+
 clean:
-	- rm -f mnsh init config.c mnsh.o darray.o echokey
+	- rm -f nmsh mnsh init config.c mnsh.o darray.o input.o echokey
 
 .PHONY: clean

@@ -75,8 +75,6 @@ int main(int argc,char *const *argv,char *const *envi){
     setlocale(LC_CTYPE,"");
 
 
-    int input_mod=IN_ECHO|IN_HANDLE_CHAR;
-
     if(argc>=2){
         const char *p=file_is_exist(argv[1],F_OK|X_OK,1);
         if(!p){
@@ -93,7 +91,6 @@ int main(int argc,char *const *argv,char *const *envi){
         }
         lseek(fd,0,SEEK_SET);
         is_script=1;
-        input_mod=0;
         dup2(fd,STDIN_FILENO);
         g_argc=argc-2;
         g_argv=&argv[1];
@@ -111,7 +108,6 @@ int main(int argc,char *const *argv,char *const *envi){
     if(!isatty(STDIN_FILENO)||!isatty(STDOUT_FILENO)||!isatty(STDERR_FILENO)){
         is_script=1;
     }
-    set_terminal_echo(0);
     set_signal_handler(0);
 
     if(!is_script){
@@ -135,12 +131,9 @@ int main(int argc,char *const *argv,char *const *envi){
         const char *ps=NULL;
         if(!is_script){
             ps=gets_var(psn);
-            if(ps){
-                write(STDOUT_FILENO,ps,strlen(ps));
-            }
         }
         da_init(&buffer);
-        int r=input(input_mod);
+        int r=input_readline(ps);
 
         deal_jobmsg();
 
@@ -151,7 +144,6 @@ int main(int argc,char *const *argv,char *const *envi){
         case 127:
             return 127;
         case -1:
-            set_terminal_echo(1);
             set_signal_handler(1);
             printf("\nexit\n");
             return 0;
@@ -184,7 +176,6 @@ int main(int argc,char *const *argv,char *const *envi){
                 memcpy(&tmp_buffer,&buffer,sizeof(da_str));
                 psn="PS2";
                 if(r==2){
-                    set_terminal_echo(1);
                     return 0;
                 }
                 continue;
@@ -201,14 +192,12 @@ int main(int argc,char *const *argv,char *const *envi){
             psn="PS1";
 
             if(r==2){
-                set_terminal_echo(1);
                 return 0;
             }
             break;
         }
     }
 
-    set_terminal_echo(1);
     set_signal_handler(1);
     printf("exit\n");
 
@@ -961,7 +950,6 @@ int parse_buffer(da_command *cmds,const char *str,size_t *inter){
     }
 
 
-    set_terminal_echo(1);
     now_name=restore_cmd(cmds->arr,cmds->size);
     for(size_t i=0;i<cmds->size;i++){
         command_t *p=&cmds->arr[i];
@@ -978,7 +966,6 @@ int parse_buffer(da_command *cmds,const char *str,size_t *inter){
     if(is_child){
         exit(g_ret);
     }
-    set_terminal_echo(0);
 
     if(ret&PARSE_SUBPRASE_END){
         *inter=i;
@@ -1119,10 +1106,7 @@ int exe_parse_redirector(int st,command_redir_t *redir){
             while(1){
                 da_fake_clear(&buffer);
                 const char *ps=gets_var("PS2");
-                if(ps){
-                    write(STDOUT_FILENO,ps,strlen(ps));
-                }
-                input(IN_ECHO|IN_HANDLE_CHAR);
+                input(ps);
                 if(buffer.size==len&&!memcmp(buffer.arr,redir->_2,len)){
                     break;
                 }
@@ -1281,7 +1265,6 @@ int exe_parse_cmd(command_t *cmd,int st){
 }
 
 int execute_command_child(command_t *cmd){
-    set_terminal_echo(1);
     cmd_execvpe(cmd->argv[0],cmd->argv,env.arr);
 
     cmd->argv=realloc(cmd->argv,(cmd->argvn+1)*sizeof(char*));
