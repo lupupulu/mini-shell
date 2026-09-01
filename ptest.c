@@ -41,9 +41,7 @@ static void run_parse(const char *input){
             if(*cmd->data.arr[d]!=i) continue;
             if(cmd->type.arr[i]==CMD_EXECUTE){
                 type_execute *e=(void*)cmd->data.arr[d];
-                printf("  [");
-                for(size_t j=0;e->argraw[j];j++) printf("%s%s",j?",":"",e->argraw[j]);
-                printf("]");
+                printf("  [%s]",e->argraw);
             }else if(cmd->type.arr[i]>=CMD_REDIR_IN&&cmd->type.arr[i]<=CMD_REDIR_CLOSE){
                 type_redir *r=(void*)cmd->data.arr[d];
                 printf("  (fd=%d",r->from_fd);

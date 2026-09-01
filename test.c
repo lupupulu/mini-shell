@@ -30,11 +30,7 @@ int main(void){
         printf("%lu",*cmd->data.arr[i]);
         if(cmd->type.arr[*cmd->data.arr[i]]==CMD_EXECUTE){
             type_execute *e=(void*)cmd->data.arr[i];
-            size_t j=0;
-            while(e->argraw[j]){
-                printf("\t%s\n",e->argraw[j]);
-                j++;
-            }
+            printf("\t%s\n",e->argraw);
         }else if(cmd->type.arr[*cmd->data.arr[i]]>=CMD_REDIR_IN&&cmd->type.arr[*cmd->data.arr[i]]<=CMD_REDIR_CLOSE){
             type_redir *r=(void*)cmd->data.arr[i];
             printf("\t%d %d\n",r->from_fd,r->to_fd);

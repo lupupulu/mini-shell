@@ -5,6 +5,7 @@
 
 typedef enum {
     CMD_RESERVED,
+
     CMD_EXECUTE,
     CMD_BREAK,
 
@@ -29,7 +30,7 @@ typedef enum {
 
     CMD_CASE,
     CMD_ESAC,
-    CMD_CASE_BREAK,
+    CMD_CASE_BREAK,      /* internal break type only, never emitted */
 
     CMD_FOR,
     CMD_WHILE,
@@ -64,7 +65,7 @@ typedef enum {
    loc being at offset 0. */
 typedef struct{
     size_t loc;          /* index into cmds->type */
-    char **argraw;       /* owned: NULL-terminated array of char* (words point into the input buffer) */
+    char *argraw;        /* the complete command, pointing into the input buffer (not owned) */
 }type_execute;
 
 typedef struct{
@@ -85,19 +86,7 @@ typedef struct {
 
 static int parse_error;
 
-/* parse session state (reset by parse_deal_break(CMD_RESERVED,...)) */
-static int parse_pipe_is_continue;   /* an open pipeline is waiting for its next member */
-static int parse_pipe_need_cmd;      /* a command is required right after '|' */
-static int parse_case_pattern;       /* inside case: ')' terminates a pattern */
-static int parse_in_case;            /* between CMD_CASE and CMD_ESAC */
-static int parse_seen_in;            /* CMD_IN already emitted for this case */
-static int parse_expect_in;          /* the next word should be the keyword "in" */
-static int parse_func_paren;         /* the next ')' belongs to a function definition */
-static int parse_open_ops;           /* number of unclosed { ( } groups in the current segment */
-
-
-
-static inline void *parse_create_execute(char **argraw);
+static inline void *parse_create_execute(char *argraw);
 static inline void *parse_create_redir(int from_fd);
 
 static inline void parse_add_type(commands_t *cmds,int type,size_t *data);
@@ -105,19 +94,21 @@ static inline void parse_add_type_loc(commands_t *cmds,int type,size_t *data,siz
 static inline void parse_add_stype(commands_t *cmds,int type);
 static inline void parse_add_stype_loc(commands_t *cmds,int type,size_t loc);
 
-static inline void parse_emit_execute(commands_t *cmds,char **argraw);
+static void parse_emit_execute(commands_t *cmds,char *argraw);
+static int parse_emit_command_raw(commands_t *cmds,char *buf,size_t start,size_t end);
 
 static inline void parse_skip_dollar(char *buf,size_t *i);
 static inline cmd_type_t parse_is_break(const char *buf,size_t *i);
 static inline cmd_type_t parse_is_keyword(const char *buf,size_t *i);
 static inline int parse_is_fd(const char *buf);
+static inline int parse_is_fd_span(const char *buf,size_t len);
+static inline int parse_span_is_blank(const char *buf,size_t start,size_t end);
+static inline int stracmp(const char *a,const char *b);
 static inline int strabcmp(const char *a,const char *b);
 static inline int parse_is_funcname(const char *s,size_t len);
-static inline int parse_is_execute_break(cmd_type_t t);
 
 static inline int parse_set_pipe_start(commands_t *cmds);
 
-static void parse_deal_break(cmd_type_t break_type,commands_t *cmds,char **argraw,int fd_adjacent);
 static void parse_attach_redir_target(commands_t *cmds,const char *target,char *buf,size_t *i);
 static void parse_collect_heredoc(char *buf,size_t *i,const char *delim,char **body);
 static int parse_validate(const commands_t *cmds);
@@ -125,10 +116,11 @@ static int parse_validate(const commands_t *cmds);
 static commands_t *parse_divide_command(char *buf);
 
 /* Free the heap contents of a commands_t produced by parse_divide_command:
-   every type_execute / type_redir structure and the buffers they own
-   (argraw lists, to_file copies, here-document bodies).
+   every type_execute / type_redir structure and the buffers owned by the
+   parser (to_file copies, here-document bodies).  type_execute.argraw is
+   NOT freed -- it points into the caller's input buffer.
    Safe on partially built structures (the error path uses a stack struct).
-   The commands_t object itself is NOT freed — the caller releases it
+   The commands_t object itself is NOT freed -- the caller releases it
    (free(cmds)) when it was heap-allocated by parse_divide_command. */
 void parse_commands_free(commands_t *cmds){
     if(!cmds){
@@ -136,14 +128,12 @@ void parse_commands_free(commands_t *cmds){
     }
     for(size_t i=0;i<cmds->data.size;i++){
         size_t loc=*cmds->data.arr[i];
-        if(loc<cmds->type.size&&cmds->type.arr[loc]==CMD_EXECUTE){
-            type_execute *e=(void*)cmds->data.arr[i];
-            free(e->argraw);
-        }else if(loc<cmds->type.size&&cmds->type.arr[loc]>=CMD_REDIR_IN&&cmds->type.arr[loc]<=CMD_REDIR_CLOSE){
+        if(loc<cmds->type.size&&cmds->type.arr[loc]>=CMD_REDIR_IN&&cmds->type.arr[loc]<=CMD_REDIR_CLOSE){
             type_redir *r=(void*)cmds->data.arr[i];
             free(r->to_file);
             free(r->body);
         }
+        /* type_execute owns nothing on the heap: argraw points into the input */
         free(cmds->data.arr[i]);
     }
     da_clear(&cmds->type);
@@ -156,16 +146,30 @@ static commands_t *parse_divide_command(char *buf){
     da_init(&cmds.type);
     da_init(&cmds.data);
 
-    size_t start=0,i=0;
-    darray_t(char*) arg;
-    da_init(&arg);
-    void *cnull=NULL;
+    size_t start=0,word_start=0,i=0;
 
     int is_redir=0;         /* a redirector was seen; the next word is its target */
-    int quote=0;
+    int quote=0;            /* inside a double-quoted region */
+
+    int pipe_is_continue=0; /* an open pipeline is waiting for its next member */
+    int pipe_need_cmd=0;    /* a command is required right after '|' */
+
+    int in_case=0;          /* between CMD_CASE and CMD_ESAC */
+    int seen_in=0;          /* CMD_IN already emitted for this case */
+    int expect_in=0;        /* the next word should be the keyword "in" */
+    int case_pattern=0;     /* inside case: ')' terminates a pattern */
     int for_var_pending=0;  /* the next word is the for-loop variable */
 
-    parse_deal_break(CMD_RESERVED,NULL,NULL,0);
+    int func_paren=0;       /* the next ')' belongs to a function definition */
+    int open_ops=0;         /* number of unclosed { ( } groups in the current segment */
+
+    /* emit the pending command text [s,e) as one CMD_EXECUTE; when a command
+       was actually emitted, the member after '|' has arrived */
+#define emit_command(s,e) do{ \
+        if(parse_emit_command_raw(&cmds,buf,(s),(e))){ \
+            pipe_need_cmd=0; \
+        } \
+    }while(0)
 
     while(buf[i]!='\0'){
         if(parse_error){
@@ -176,43 +180,45 @@ static commands_t *parse_divide_command(char *buf){
         cmd_type_t break_type=parse_is_break(buf,&next_i);
 
         /* inside case: ')' terminates the pattern list */
-        if(break_type==CMD_SUBSHELL_END&&parse_case_pattern&&!is_redir&&!quote){
-            if(i!=start){
-                char *part=&buf[start];
-                buf[i++]='\0';
-                da_add(sizeof(char*),&arg,&part);
+        if(break_type==CMD_SUBSHELL_END&&case_pattern&&!is_redir&&!quote){
+            if(parse_span_is_blank(buf,start,i)){
+                fprintf(stderr,"parse: syntax error: empty case pattern\n");
+                parse_error=1;
+                goto L_error;
             }
-            da_add(sizeof(char*),&arg,&cnull);
-            if(arg.arr[0]){
-                parse_emit_execute(&cmds,arg.arr);
-                parse_add_stype(&cmds,CMD_BREAK);
-                da_init(&arg);
-            }else{
-                da_clear(&arg);
-            }
-            parse_case_pattern=0;
+            emit_command(start,i);
+            parse_add_stype(&cmds,CMD_BREAK);
+            case_pattern=0;
+
             i=next_i;
+            while(buf[i]==' '||buf[i]=='\t'||buf[i]=='\n'){
+                i++;
+            }
             start=i;
+            word_start=i;
             continue;
         }
 
         /* ')' of a function definition is pure syntax */
-        if(break_type==CMD_SUBSHELL_END&&parse_func_paren&&!is_redir&&!quote){
-            parse_func_paren=0;
-            da_clear(&arg);
+        if(break_type==CMD_SUBSHELL_END&&func_paren&&!is_redir&&!quote){
+            func_paren=0;
             i=next_i;
+            while(buf[i]==' '||buf[i]=='\t'||buf[i]=='\n'){
+                i++;
+            }
             start=i;
+            word_start=i;
             continue;
         }
 
         /* '#' starts a comment only at the start of a word (e.g. not in "$#") */
-        if(break_type==CMD_BREAK&&buf[i]=='#'&&i!=start){
+        if(break_type==CMD_BREAK&&buf[i]=='#'&&i!=word_start){
             break_type=CMD_RESERVED;
             next_i=i;
         }
 
         /* ')' '}' are only operators when a matching opener is open */
-        if((break_type==CMD_SUBSHELL_END||break_type==CMD_PART_END||break_type==CMD_MATH_END)&&!parse_open_ops){
+        if((break_type==CMD_SUBSHELL_END||break_type==CMD_PART_END||break_type==CMD_MATH_END)&&!open_ops){
             break_type=CMD_RESERVED;
             next_i=i;
         }
@@ -220,15 +226,15 @@ static commands_t *parse_divide_command(char *buf){
         /* '(' '{' '((' are only operators at command position, attached to a
            single word (function definition), or right after '=' (array assign) */
         if((break_type==CMD_SUBSHELL_START||break_type==CMD_PART_START||break_type==CMD_MATH_START)
-                &&(is_redir||(arg.size&&i==start)||(i>start&&buf[i-1]=='='))){
+                &&(is_redir||(i==word_start&&!parse_span_is_blank(buf,start,i))||(i>start&&buf[i-1]=='='))){
             break_type=CMD_RESERVED;
             next_i=i;
         }
 
-        /* reserved words only at command position (arg empty, word start) */
-        if(!is_redir&&i==start&&arg.size==0&&break_type==CMD_RESERVED){
+        /* reserved words only at command position (no pending command text) */
+        if(!is_redir&&i==start&&break_type==CMD_RESERVED){
             break_type=parse_is_keyword(buf,&next_i);
-        }else if(!is_redir&&i==start&&arg.size==1&&break_type==CMD_RESERVED&&parse_expect_in){
+        }else if(!is_redir&&i==word_start&&expect_in&&break_type==CMD_RESERVED){
             /* "in" after the for-variable / case word */
             if(!strabcmp("in",&buf[i])){
                 break_type=CMD_IN;
@@ -237,9 +243,10 @@ static commands_t *parse_divide_command(char *buf){
         }
 
         /* a newline right after '|' continues the pipeline */
-        if(break_type==CMD_BREAK&&buf[i]=='\n'&&parse_pipe_is_continue&&i==start&&!is_redir){
+        if(break_type==CMD_BREAK&&buf[i]=='\n'&&pipe_is_continue&&i==start&&!is_redir){
             i=next_i;
             start=i;
+            word_start=i;
             continue;
         }
 
@@ -247,90 +254,242 @@ static commands_t *parse_divide_command(char *buf){
         if(break_type==CMD_BREAK&&buf[i]=='\n'&&is_redir&&i==start){
             i=next_i;
             start=i;
+            word_start=i;
             continue;
         }
 
         /* function definition: name( */
-        if(break_type==CMD_SUBSHELL_START&&!is_redir&&!quote&&i!=start&&arg.size==0
+        if(break_type==CMD_SUBSHELL_START&&!is_redir&&!quote&&i!=start&&start==word_start
                 &&parse_is_funcname(&buf[start],i-start)){
-            char *part=&buf[start];
             buf[i]='\0';
-            i=next_i;
-            da_add(sizeof(char*),&arg,&part);
-            da_add(sizeof(char*),&arg,&cnull);
             parse_add_stype(&cmds,CMD_FUNCTION);
-            parse_emit_execute(&cmds,arg.arr);
-            parse_func_paren=1;
-            da_init(&arg);
+            parse_emit_execute(&cmds,&buf[start]);
+            func_paren=1;
+            i=next_i;
+            while(buf[i]==' '||buf[i]=='\t'||buf[i]=='\n'){
+                i++;
+            }
             start=i;
+            word_start=i;
             continue;
         }
 
-        /* word / operator boundary */
-        if((!quote&&(buf[i]==' '||buf[i]=='\n'||break_type!=CMD_RESERVED))){
-            if(break_type!=CMD_RESERVED&&break_type!=CMD_BREAK&&is_redir){
-                fprintf(stderr,"parse: no command before a redirector\n");
+        /* ordinary character (or inside quotes): skip it via L */
+        if(quote||(buf[i]!=' '&&buf[i]!='\t'&&buf[i]!='\n'&&break_type==CMD_RESERVED)){
+            goto L;
+        }
+
+        /* ---- word / operator boundary (blank or operator) ---- */
+
+        /* a redirector is waiting for its target: the current word ends here */
+        if(is_redir){
+            if(break_type!=CMD_RESERVED&&break_type!=CMD_BREAK){
+                fprintf(stderr,"parse: syntax error: redirector without a target\n");
                 parse_error=1;
-                continue;
+                goto L_error;
             }
-            if(is_redir){
-                /* the current word is the redirector target */
-                if(i==start){
-                    fprintf(stderr,"parse: missing target for redirector\n");
-                    parse_error=1;
-                    continue;
-                }
-                buf[i]='\0';
-                size_t tstart=start;
-                i++;
-                parse_attach_redir_target(&cmds,&buf[tstart],buf,&i);
-                is_redir=0;
-                start=i;
-                continue;
+            if(word_start==i){
+                fprintf(stderr,"parse: syntax error: redirector without a target\n");
+                parse_error=1;
+                goto L_error;
             }
-            int fd_adjacent=(i!=start);
-            if(i!=start){
-                char *part=&buf[start];
-                buf[i++]='\0';
-                da_add(sizeof(char*),&arg,&part);
-                if(for_var_pending){
-                    for_var_pending=0;
-                    parse_expect_in=1;
-                }else if(parse_in_case&&!parse_seen_in){
-                    parse_expect_in=1;
-                }
-            }
-            if(break_type!=CMD_RESERVED){
-                if(arg.size){
-                    da_add(sizeof(char*),&arg,&cnull);
-                }
-                parse_deal_break(break_type,&cmds,arg.size?arg.arr:NULL,fd_adjacent);
-                if(parse_is_execute_break(break_type)){
-                    da_init(&arg);
-                }else{
-                    da_clear(&arg);
-                }
-                if(break_type==CMD_FOR){
-                    for_var_pending=1;
-                }
-                i=next_i;
-            }
-            if(break_type>=CMD_REDIR_IN&&break_type<=CMD_REDIR_HERE_STRING){
-                is_redir=1;
-            }
-            break_type=CMD_RESERVED;
-
-            if(buf[i]=='\0'){
-                break;
-            }
-
-            while(buf[i]==' '||buf[i]=='\n'){
-                i++;
-            }
+            buf[i]='\0';
+            size_t tstart=word_start;
+            i++;   /* move past the terminating space / newline */
+            parse_attach_redir_target(&cmds,&buf[tstart],buf,&i);
+            is_redir=0;
             start=i;
+            word_start=i;
             continue;
         }
 
+        /* plain whitespace only: word boundary, no operator */
+        if(break_type==CMD_RESERVED){
+            goto L_word_boundary;
+        }
+
+        /* ---- a redirection operator ---- */
+        if(break_type>=CMD_REDIR_IN&&break_type<=CMD_REDIR_CLOSE){
+            /* only a digit word directly before the operator is an fd */
+            int fd=parse_is_fd_span(&buf[word_start],i-word_start);
+            /* an adjacent fd word belongs to the redirector, otherwise
+               the whole pending span up to the operator is the command */
+            if(fd>=0){
+                emit_command(start,word_start);
+                goto L_insert_redir;
+            }
+            emit_command(start,i);
+
+        L_insert_redir:
+            /* insert the redir right before its own command: the last
+               EXECUTE of the trailing run (or at the end) */
+            size_t loc=cmds.type.size;
+            while(loc>0&&cmds.type.arr[loc-1]==CMD_EXECUTE){
+                loc--;
+            }
+            if(loc<cmds.type.size){
+                loc=cmds.type.size-1;
+            }
+            parse_add_type_loc(&cmds,break_type,parse_create_redir(fd),loc);
+            /* '>&-' / '<&-' close the fd and take no target */
+            is_redir=(break_type<=CMD_REDIR_HERE_STRING);
+            goto L_after_operator;   /* a redirector takes no separator switch */
+        }
+
+        /* ---- a command separator / keyword / grouping operator ---- */
+        switch(break_type){
+        case CMD_CASE_BREAK:
+            emit_command(start,i);
+            parse_add_stype(&cmds,CMD_BREAK);
+            parse_add_stype(&cmds,CMD_BREAK);
+            case_pattern=1;     /* the next ')' starts a new pattern */
+            break;
+
+        case CMD_BREAK:
+            if(start<i&&!parse_span_is_blank(buf,start,i)){
+                emit_command(start,i);
+                parse_add_stype(&cmds,CMD_BREAK);
+            }
+            break;
+
+        case CMD_AND:
+        case CMD_OR:
+            emit_command(start,i);
+            parse_add_stype(&cmds,break_type);
+            break;
+
+        case CMD_PIPE:
+            if(start==i||parse_span_is_blank(buf,start,i)){
+                fprintf(stderr,"parse: syntax error near '|'\n");
+                parse_error=1;
+                goto L_error;
+            }
+            parse_add_stype(&cmds,pipe_is_continue?CMD_CONTINUE_PIPE:CMD_CREATE_PIPE);
+            pipe_is_continue=1;
+            emit_command(start,i);
+            pipe_need_cmd=1;   /* the member after '|' is still required */
+            break;
+
+        case CMD_BACKGROUND:
+            if(start==i||parse_span_is_blank(buf,start,i)){
+                fprintf(stderr,"parse: syntax error near '&'\n");
+                parse_error=1;
+                goto L_error;
+            }
+            emit_command(start,i);
+            parse_set_pipe_start(&cmds);
+            parse_add_stype(&cmds,CMD_BACKGROUND_END);
+            parse_add_stype(&cmds,CMD_BREAK);
+            break;
+
+        case CMD_IN:
+            emit_command(start,i);
+            parse_add_stype(&cmds,CMD_IN);
+            expect_in=0;
+            if(in_case){
+                seen_in=1;
+                case_pattern=1;
+            }
+            break;
+
+        case CMD_CASE:
+            parse_add_stype(&cmds,CMD_CASE);
+            in_case=1;
+            seen_in=0;
+            expect_in=0;
+            break;
+
+        case CMD_ESAC:
+            emit_command(start,i);
+            parse_add_stype(&cmds,CMD_ESAC);
+            in_case=0;
+            seen_in=0;
+            expect_in=0;
+            case_pattern=0;
+            break;
+
+        case CMD_DO:
+            parse_add_stype(&cmds,CMD_DO);
+            for_var_pending=0;
+            expect_in=0;
+            break;
+
+        case CMD_IF:
+        case CMD_THEN:
+        case CMD_ELSE:
+        case CMD_FI:
+        case CMD_FOR:
+        case CMD_WHILE:
+        case CMD_UNTIL:
+        case CMD_DONE:
+            parse_add_stype(&cmds,break_type);
+            if(break_type==CMD_FOR){
+                for_var_pending=1;
+            }
+            break;
+
+        case CMD_SUBSHELL_START:
+        case CMD_MATH_START:
+        case CMD_PART_START:
+            parse_add_stype(&cmds,break_type);
+            open_ops++;
+            break;
+
+        case CMD_SUBSHELL_END:
+        case CMD_MATH_END:
+        case CMD_PART_END:
+            emit_command(start,i);
+            parse_add_stype(&cmds,break_type);
+            if(open_ops){
+                open_ops--;
+            }
+            break;
+
+        default:
+            fprintf(stderr,"parse: internal error: unhandled operator\n");
+            parse_error=1;
+            goto L_error;
+        }
+
+        /* an open pipeline ends when a non-pipe separator arrives */
+        if(break_type!=CMD_PIPE&&pipe_is_continue){
+            pipe_is_continue=0;
+            parse_add_stype(&cmds,CMD_DELETE_PIPE);
+            parse_add_stype(&cmds,CMD_BREAK);
+        }
+
+    L_after_operator:
+        i=next_i;
+        while(buf[i]==' '||buf[i]=='\t'||buf[i]=='\n'){
+            i++;
+        }
+        start=i;
+        word_start=i;
+        continue;
+
+    L_word_boundary:
+        /* ---- plain whitespace: word boundary ---- */
+        if(word_start<i){
+            if(for_var_pending){
+                for_var_pending=0;
+                expect_in=1;
+            }else if(in_case&&!seen_in){
+                expect_in=1;
+            }
+        }
+        i++;
+        while(buf[i]==' '||buf[i]=='\t'){
+            i++;
+        }
+        word_start=i;
+        /* nothing but blanks pending: still at command position */
+        if(parse_span_is_blank(buf,start,i)){
+            start=i;
+        }
+        continue;
+
+        /* ---- ordinary character: skip quoted regions / expansions ---- */
+        L:
         switch(buf[i]){
         case '\\':
             i++;
@@ -340,6 +499,10 @@ static commands_t *parse_divide_command(char *buf){
             break;
 
         case '\'':
+            if(quote){
+                i++;   /* literal quote inside double quotes */
+                break;
+            }
             i++;
             while(buf[i]&&buf[i]!='\''){
                 i++;
@@ -359,6 +522,7 @@ static commands_t *parse_divide_command(char *buf){
                     i++;
                 }
                 if(buf[i]=='\0'){
+                    fprintf(stderr,"parse: unterminated backquote\n");
                     parse_error=1;
                     break;
                 }
@@ -391,28 +555,36 @@ static commands_t *parse_divide_command(char *buf){
     }
 
     if(is_redir){
-        if(i!=start){
-            parse_attach_redir_target(&cmds,&buf[start],buf,&i);
+        if(word_start<i){
+            buf[i]='\0';
+            parse_attach_redir_target(&cmds,&buf[word_start],buf,&i);
         }else{
-            fprintf(stderr,"parse: missing target for redirector\n");
+            fprintf(stderr,"parse: syntax error: redirector without a target\n");
             parse_error=1;
         }
         if(parse_error){
             goto L_error;
         }
         is_redir=0;
+        /* the target word is consumed: nothing stays pending */
+        start=i;
+        word_start=i;
     }
 
-    if(arg.size){
-        da_add(sizeof(char*),&arg,&cnull);
-        parse_deal_break(CMD_BREAK,&cmds,arg.arr,0);
-    }else if(parse_pipe_need_cmd){
-        fprintf(stderr,"parse: expected a command after '|'\n");
+    if(start<i&&!parse_span_is_blank(buf,start,i)){
+        emit_command(start,i);
+        parse_add_stype(&cmds,CMD_BREAK);
+    }else if(pipe_need_cmd){
+        fprintf(stderr,"parse: syntax error: expected a command after '|'\n");
         parse_error=1;
         goto L_error;
-    }else{
-        /* closes an open pipeline */
-        parse_deal_break(CMD_BREAK,&cmds,NULL,0);
+    }
+
+    /* closes an open pipeline */
+    if(pipe_is_continue){
+        pipe_is_continue=0;
+        parse_add_stype(&cmds,CMD_DELETE_PIPE);
+        parse_add_stype(&cmds,CMD_BREAK);
     }
 
     if(parse_validate(&cmds)){
@@ -427,200 +599,8 @@ static commands_t *parse_divide_command(char *buf){
 
 L_error:
     parse_commands_free(&cmds);
-    da_clear(&arg);
-    parse_deal_break(CMD_RESERVED,NULL,NULL,0);
     parse_error=0;
     return NULL;
-}
-
-/* kinds of breaks that attach the pending word list to a new CMD_EXECUTE
-   (the arg buffer then belongs to that EXECUTE and must not be freed here) */
-static inline int parse_is_execute_break(cmd_type_t t){
-    switch(t){
-    case CMD_BREAK:
-    case CMD_AND:
-    case CMD_OR:
-    case CMD_PIPE:
-    case CMD_BACKGROUND:
-    case CMD_CASE_BREAK:
-    case CMD_IN:
-    case CMD_ESAC:
-    case CMD_PART_END:
-    case CMD_SUBSHELL_END:
-    case CMD_MATH_END:
-        return 1;
-    default:
-        return t>=CMD_REDIR_IN&&t<=CMD_REDIR_CLOSE;
-    }
-}
-
-static void parse_deal_break(cmd_type_t break_type,commands_t *cmds,char **argraw,int fd_adjacent){
-    if(break_type==CMD_RESERVED){
-        parse_pipe_is_continue=0;
-        parse_pipe_need_cmd=0;
-        parse_case_pattern=0;
-        parse_in_case=0;
-        parse_seen_in=0;
-        parse_expect_in=0;
-        parse_func_paren=0;
-        parse_open_ops=0;
-        return;
-    }
-
-    /* ---- redirectors: strip the adjacent fd word, emit the pending command,
-           then insert the redir opcode before the trailing EXECUTE run ---- */
-    if(break_type>=CMD_REDIR_IN&&break_type<=CMD_REDIR_CLOSE){
-        int fd=-1;
-        if(fd_adjacent&&argraw&&argraw[0]){
-            size_t n=0;
-            while(argraw[n+1]){
-                n++;
-            }
-            int f=parse_is_fd(argraw[n]);
-            if(f>=0){
-                fd=f;
-                argraw[n]=NULL;   /* the fd word is consumed, not an argument */
-            }
-        }
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-        }else if(argraw){
-            /* the pending arg list became empty (fd word consumed): release it */
-            free(argraw);
-            argraw=NULL;
-        }
-        /* insert the redir right before its own command: the LAST EXECUTE of
-           the trailing run (or at the end when there is no trailing run) */
-        size_t loc=cmds->type.size;
-        while(loc>0&&cmds->type.arr[loc-1]==CMD_EXECUTE){
-            loc--;
-        }
-        if(loc<cmds->type.size){
-            loc=cmds->type.size-1;
-        }
-        parse_add_type_loc(cmds,break_type,parse_create_redir(fd),loc);
-        return;
-    }
-
-    switch(break_type){
-    case CMD_CASE_BREAK:
-        parse_emit_execute(cmds,argraw);
-        parse_add_stype(cmds,CMD_BREAK);
-        parse_add_stype(cmds,CMD_BREAK);
-        parse_case_pattern=1;     /* the next ')' starts a new pattern */
-        break;
-
-    case CMD_BREAK:
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-            parse_add_stype(cmds,CMD_BREAK);
-        }
-        break;
-
-    case CMD_AND:
-    case CMD_OR:
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-        }
-        parse_add_stype(cmds,break_type);
-        break;
-
-    case CMD_PIPE:
-        if(!argraw||!argraw[0]){
-            fprintf(stderr,"parse: syntax error near '|'\n");
-            parse_error=1;
-            break;
-        }
-        parse_add_stype(cmds,parse_pipe_is_continue?CMD_CONTINUE_PIPE:CMD_CREATE_PIPE);
-        parse_pipe_is_continue=1;
-        parse_emit_execute(cmds,argraw);
-        parse_pipe_need_cmd=1;   /* the member after '|' is still required */
-        break;
-
-    case CMD_BACKGROUND:
-        if(!argraw||!argraw[0]){
-            fprintf(stderr,"parse: syntax error near '&'\n");
-            parse_error=1;
-            break;
-        }
-        parse_emit_execute(cmds,argraw);
-        parse_set_pipe_start(cmds);
-        parse_add_stype(cmds,CMD_BACKGROUND_END);
-        parse_add_stype(cmds,CMD_BREAK);
-        break;
-
-    case CMD_IN:
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-        }
-        parse_add_stype(cmds,CMD_IN);
-        if(parse_in_case){
-            parse_seen_in=1;
-            parse_case_pattern=1;
-        }
-        break;
-
-    case CMD_CASE:
-        parse_add_stype(cmds,CMD_CASE);
-        parse_in_case=1;
-        break;
-
-    case CMD_ESAC:
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-        }
-        parse_add_stype(cmds,CMD_ESAC);
-        parse_in_case=0;
-        parse_seen_in=0;
-        parse_case_pattern=0;
-        parse_expect_in=0;
-        break;
-
-    case CMD_DO:
-        parse_add_stype(cmds,CMD_DO);
-        parse_expect_in=0;
-        break;
-
-    case CMD_IF:
-    case CMD_THEN:
-    case CMD_ELSE:
-    case CMD_FI:
-    case CMD_FOR:
-    case CMD_WHILE:
-    case CMD_UNTIL:
-    case CMD_DONE:
-        parse_add_stype(cmds,break_type);
-        break;
-
-    case CMD_SUBSHELL_START:
-    case CMD_MATH_START:
-    case CMD_PART_START:
-        parse_add_stype(cmds,break_type);
-        parse_open_ops++;
-        break;
-
-    case CMD_SUBSHELL_END:
-    case CMD_MATH_END:
-    case CMD_PART_END:
-        if(argraw&&argraw[0]){
-            parse_emit_execute(cmds,argraw);
-        }
-        parse_add_stype(cmds,break_type);
-        if(parse_open_ops){
-            parse_open_ops--;
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    /* an open pipeline ends when a non-pipe separator arrives */
-    if(break_type!=CMD_PIPE&&parse_pipe_is_continue){
-        parse_pipe_is_continue=0;
-        parse_add_stype(cmds,CMD_DELETE_PIPE);
-        parse_add_stype(cmds,CMD_BREAK);
-    }
 }
 
 static void parse_attach_redir_target(commands_t *cmds,const char *target,char *buf,size_t *i){
@@ -822,7 +802,7 @@ static inline void parse_skip_dollar(char *buf,size_t *i){
 
     case '(':
         if(buf[i+1]=='('){
-            /* $(( arithmetic )) — skip to the matching "))" */
+            /* $(( arithmetic )) -- skip to the matching "))" */
             int depth=1;
             i+=2;
             while(buf[i]&&depth){
@@ -1037,6 +1017,35 @@ static inline int parse_is_fd(const char *buf){
     return fd;
 }
 
+/* like parse_is_fd, but the digit run is [buf, buf+len) without a
+   trailing '\0' (the word before a redirector is not yet terminated) */
+static inline int parse_is_fd_span(const char *buf,size_t len){
+    if(buf==NULL||len==0){
+        return -1;
+    }
+    int fd=0;
+    for(size_t k=0;k<len;k++){
+        if(buf[k]<'0'||buf[k]>'9'){
+            return -1;
+        }
+        if(fd>(0x7fffffff-(buf[k]-'0'))/10){
+            return -1;   /* overflow guard */
+        }
+        fd=fd*10+(buf[k]-'0');
+    }
+    return fd;
+}
+
+/* true when [start,end) contains only blanks -- i.e. no command text */
+static inline int parse_span_is_blank(const char *buf,size_t start,size_t end){
+    for(size_t k=start;k<end;k++){
+        if(buf[k]!=' '&&buf[k]!='\t'&&buf[k]!='\n'){
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static inline int parse_is_funcname(const char *s,size_t len){
     if(!len){
         return 0;
@@ -1053,7 +1062,7 @@ static inline int parse_is_funcname(const char *s,size_t len){
 }
 
 
-static inline void *parse_create_execute(char **argraw){
+static inline void *parse_create_execute(char *argraw){
     type_execute *r=malloc(sizeof(type_execute));
     *r=(type_execute){.loc=0,.argraw=argraw};
     return r;
@@ -1103,15 +1112,33 @@ static inline void parse_add_stype_loc(commands_t *cmds,int type,size_t loc){
     }
 }
 
-static inline void parse_emit_execute(commands_t *cmds,char **argraw){
-    parse_pipe_need_cmd=0;
+static void parse_emit_execute(commands_t *cmds,char *argraw){
     parse_add_type(cmds,CMD_EXECUTE,parse_create_execute(argraw));
+}
+
+/* Emit the pending command text [start,end) as one CMD_EXECUTE whose
+   argraw points to buf+start.  Trailing blanks are trimmed so that the
+   complete command has no trailing whitespace; buf[end] is overwritten
+   with '\0' to terminate the string in place.
+   Returns 1 when a command was emitted, 0 when the span was empty. */
+static int parse_emit_command_raw(commands_t *cmds,char *buf,size_t start,size_t end){
+    while(end>start&&(buf[end-1]==' '||buf[end-1]=='\t'||buf[end-1]=='\n')){
+        end--;
+    }
+    if(end<=start){
+        return 0;
+    }
+    buf[end]='\0';
+    parse_emit_execute(cmds,&buf[start]);
+    return 1;
 }
 
 
 static inline int parse_set_pipe_start(commands_t *cmds){
-    size_t i=cmds->type.size-1;
-    while(i>0&&cmds->type.arr[i]!=CMD_BREAK){
+    /* insert BACKGROUND_START right after the last CMD_BREAK (or at the
+       very beginning), i.e. before the command it wraps */
+    size_t i=cmds->type.size;
+    while(i>0&&cmds->type.arr[i-1]!=CMD_BREAK){
         i--;
     }
     parse_add_stype_loc(cmds,CMD_BACKGROUND_START,i);

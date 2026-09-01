@@ -1,202 +1,190 @@
-# MINI-SHELL 代码审查报告与 parser 补全说明
+# parser.c 修复报告：使 `parse_divide_command` 正常工作（完整命令设计）
 
-审查范围：`parser.c`（重点）、`main.c`、`mnsh.c`、`CDS/darray.*`、`CDS/confc.*`、`CDS/input.*`、
-`mini-shell.c`、`echokey.c`。
-所有结论均经过实际编译与 AddressSanitizer / UndefinedBehaviorSanitizer 复现验证（见第 5 节）。
-
----
-
-## 1. 总体结论
-
-- `parser.c`（新式命令流解析器）存在 **5 处死循环**、**10+ 处逻辑错误**、**多处越界/未定义行为**和
-  **系统性内存泄漏**，其中死循环会导致交互式 shell 一输入特定字符就挂死。
-- 本次已对 `parser.c` 做了整体重写：修复全部已确认问题，并实现了下一阶段功能
-  （here-doc 主体收集、关键字结构校验、case 模式、函数定义、`$(( ))`/`$( )`/`${ }` 嵌套跳过等），
-  通过 60+ 用例的 ASan/UBSan 测试与 2000 轮泄漏测试（free 模式 0 泄漏）。
-- `main.c`/`mnsh.c` 中的旧执行器与 `CDS/` 新基础设施处于重构中途：`make` 存在 **22 个预先存在的
-  编译错误**（`command_t`、`var_arr_t` 等旧类型已从 `mnsh.h` 移除但旧代码仍在使用），
-  与本次改动无关，但意味着 `mnsh` 目前无法构建运行。
-- `parser.c` 尚未接入主程序（`Makefile` 无对应目标），执行器为下一阶段工作。
+本报告记录本轮对 `parser.c` 的修复与整理（未提交）。背景：上一次提交（`5d2ef03`）的
+REPORT 描述了旧式"词切分"解析器（`type_execute.argraw` 为 `char **` 词数组）；此后工作区中
+`parser.c` 被改到一半——意图是让 `type_execute` 不再保存"粗略划分后的词数组"，而是保存
+**完整命令原文**，但改动不完整，导致 `parser.c` 无法编译（重复声明、指针类型不匹配、
+引用未定义标识符）且解析逻辑大量失效。本轮通过上次 git 提交（可工作的旧版实现）与现存代码，
+完成了这一迁移并修复了测试中发现的全部逻辑错误。
 
 ---
 
-## 2. parser.c 问题清单（已全部修复）
+## 1. 设计变更：`type_execute` 保存完整命令
 
-### 2.1 死循环（严重，已修复）
+| 项 | 旧设计（上次提交） | 新设计（本轮完成） |
+|---|---|---|
+| `type_execute.argraw` | `char **`，NULL 结尾的**词数组**（解析器已做词切分） | `char *`，**完整命令原文**，直接指向调用者的输入缓冲 |
+| 词切分 | 解析阶段完成（空格处断词、逐个词存入数组） | 解析阶段**不再做**；引号、空格、`$` 扩展原样保留在命令文本中，词切分/展开留给执行器 |
+| 命令文本终止 | 每个词单独以 `\0` 终止 | `parse_emit_command_raw()` 在命令末尾写入 `\0`，并裁掉尾部空白 |
+| 会话状态 | 静态全局（`parse_pipe_is_continue` 等 8 个） | `parse_divide_command` 的局部变量 |
+| 内存所有权 | `argraw` 数组本身由解析器 `malloc` | `argraw` 指向调用者缓冲，`parse_commands_free` 不再释放它 |
 
-| # | 位置 | 问题 | 复现 |
-|---|------|------|------|
-| 1 | `parse_is_fd()` | `while(buf[i])` 循环内**没有 `i++`**，遇到纯数字串永不退出；且 `fd=buf[i]-'0'` 是覆盖赋值而非累加（`"12"` 会得到 2 而不是 12） | `ls 2>/dev/null`、`echo hi 2> f` 直接挂死 |
-| 2 | `parse_divide_command()` 的 `case '\''` | 循环前没有 `i++`，`i` 停在开引号处，外层循环反复进入同一分支 | 任何含单引号的输入挂死 |
-| 3 | 同上 `case '`'`（反引号） | 同样缺少先前进一个字符 | 任何含反引号的输入挂死 |
+配套调整：
 
-### 2.2 逻辑错误（严重，已修复）
+- `parse_commands_free()`：只释放 `type_redir.to_file/.body` 与各结构体本身，不再 `free(e->argraw)`；
+- 新增 `parse_is_fd_span()`：对尚无 `\0` 结尾的 `[word_start,i)` 区间做定长数字检查（fd 词判定，
+  `2>f` 为 fd、`echo 2 > f` 的 `2` 是参数）；
+- 新增 `parse_span_is_blank()`：判定 `[start,end)` 是否纯空白（用于"命令位置"判定）；
+- 新增 `parse_emit_command_raw()` + 宏 `emit_command(s,e)`：发出完整命令文本，并在真正发出
+  EXECUTE 时复位 `pipe_need_cmd`；
+- `start`（命令起点）/`word_start`（当前词起点）双游标替代旧的词数组 `arg`；空白分支在
+  pending 区间纯空白时同步前进 `start`，维持"命令位置 ⇔ `start==i`"不变式。
 
-| # | 问题 | 说明 |
+## 2. 修复的编译错误（修复前无法编译）
+
+| # | 问题 | 修复 |
 |---|------|------|
-| 4 | **重定向前的命令被丢弃** | `parse_deal_break()` 对重定向分支只添加 REDIR 操作码，从不把挂起的参数列表发出为 `CMD_EXECUTE`。`ls > test` 解析结果只有 `REDIR_OUT`，命令 `ls` 丢失 |
-| 5 | **无结尾换行时整条命令丢失** | 主循环在 `buf[i]=='\0'` 时直接退出，不冲刷挂起的词表与重定向目标。交互式输入（`input()` 剥离 `\n`）下 `echo hi` 和 `echo hi > f` 均无任何输出 |
-| 6 | 符号表循环只查前 15 项 | `symbol[]` 共 22 项，`for(j<15)` 使 `{ } ( ) (( ))` 永不识别，`CMD_PART_*`/`CMD_SUBSHELL_*`/`CMD_MATH_*` 全部是死代码；`( echo sub )` 被拆成普通词 |
-| 7 | `parse_deal_break_redir()` 的 `while(i>0)` 跳过第 0 项 | 只有一个重定向时 `break_type` 停留在 `CMD_RESERVED`，`>&2` 的 DUP 分支永不执行，`2` 被当作文件名；若 `data` 为空则 `data.arr[0]` 越界读 |
-| 8 | 管道状态机失效 | `pipe_is_continue` 只在 `parse_deal_break(CMD_RESERVED)` 清零、**从未置 1**：`a \| b \| c` 产生 `CREATE_PIPE EXE(a) CREATE_PIPE EXE(b) EXE(c)`，既无 `CONTINUE_PIPE` 也无 `DELETE_PIPE`，且 `EXE(b)` 被排在管道组之外 |
-| 9 | `parse_add_stype_loc()` 从下标 `loc` 开始遍历 data | data 数组下标与 type 下标不对应，插入 `BACKGROUND_START` 后部分 `loc` 值未 +1。`sleep 1 & echo done &` 中第二个命令的 EXECUTE 丢失参数（data 指向错误位置） |
-| 10 | `is_redir` 范围错误 | 置位范围 `[CMD_REDIR_OUT, CMD_REDIR_HERE_DOCUMENT]`：漏掉 `<`（REDIR_IN）、`<<<`（HERE_STRING），使 `< f` 的目标变成普通命令参数；`>&-`（CLOSE）范围不含但本就不应接目标 |
-| 11 | `#` 注释不要求词首 | `$#` 中 `#` 被当作注释起始，`$#` 解析成 `$` |
-| 12 | 关键字判定缺词首条件 | 只要 `arg.size==0` 就查关键字：`x=if` 在扫描到 `if` 时会被误判为 `CMD_IF` |
-| 13 | fd 判定不要求相邻 | `echo 2 > f` 中 `2` 被当作 fd 而不是 `echo` 的参数（shell 语义要求 `2>` 紧邻才算 fd） |
-| 14 | `&&`/`||` 空参数时被吞掉 | `CMD_BREAK` 的 `if(*argraw==NULL) break;` 与 `CMD_AND/CMD_OR` 共用 case，导致 `a > f && b` 的 `&&` 丢失 |
-| 15 | `parse_check()`/主循环对未闭合引号、`a \|` 悬空管道不报错 | 主循环已补：未闭合单引号/反引号、`|` 后无命令、`&` 前无命令均报 parse error 并返回 NULL |
+| 1 | `case_pattern` 重复声明（同函数内两次 `int case_pattern=0;`） | 删除重复声明，统一为一个局部变量 |
+| 2 | `save_execute()` 宏与多处 `parse_add_type(&cmds,CMD_EXECUTE,&buf[start])` 把 `char*` 传给 `size_t*` 形参 | 统一走 `parse_emit_execute()`→`parse_create_execute()` 构造 `type_execute`，`loc` 字段正确回填 |
+| 3 | `parse_deal_break()` 引用已被注释掉的静态全局（`parse_pipe_is_continue` 等）→ 未声明标识符 | 删除 `parse_deal_break()`（其逻辑已内联进主循环 switch） |
+| 4 | `parse_emit_execute()` 参数类型 `char **` 与新 `char *` 不匹配 | 签名改为 `char *` |
+| 5 | `parse_execute_exe()` 内 `i` 重声明、对 `char*` 取下标 | 整个"Execute Part"残桩删除（见第 4 节） |
 
-### 2.3 越界 / 未定义行为（已修复）
+## 3. 修复的逻辑错误（编译通过后由测试暴露）
 
-- `parse_deal_break_redir()`：`cmds->data.size==0` 时 `i=(size_t)-1` 后 `data.arr[i]` 越界读；
-  扫描未命中重定向时仍向 `data.arr[0]` 写入（可能把 `to_fd/to_file` 写进 `type_execute` 的 `argraw` 字段）。
-- 主循环 `buf[i]=='\0'` 分支中 `i++` 后继续读 `buf[i]`（越界读）——已改为在循环条件处退出并统一冲刷。
-- `parse_is_fd` 溢出：超长数字串导致 `int` 溢出（已加边界检查）。
+| # | 现象 | 根因与修复 |
+|---|------|-----------|
+| 1 | `a \| b`、`a \| b \| c` 报 "expected a command after '\|'" | `pipe_need_cmd` 置 1 后永不复位；`emit_command()` 宏现在在每次真正发出 EXECUTE 时复位它 |
+| 2 | `ls > /tmp/out`（无结尾换行）重定向目标被重复输出为一条命令 | EOF 冲刷附加目标后未前进 `start/word_start`；现在附加后同步前进 |
+| 3 | `sleep 1 & echo done &` 第二个 `BACKGROUND_START` 插到第一个 `BREAK` 之前 | `parse_set_pipe_start()` 改为把 `BACKGROUND_START` 插到**最后一个 CMD_BREAK 之后**（即被包裹命令之前） |
+| 4 | `echo hi # comment` 把注释并入命令文本 | `#` 注释判定误用 `i!=start`（命令起点）；改为 `i!=word_start`（词起点） |
+| 5 | `if ls; then ls > /tmp/out 2>&1; fi` 报 "unbalanced keywords"（`fi` 不识别） | 重定向目标后的 `;` 被目标附加逻辑吞掉后，`start` 停留在空白处，关键字检测 `i==start` 失败；空白分支现在在 pending 纯空白时前进 `start`，恢复命令位置不变式 |
+| 6 | `echo "it's"` 误报 unterminated single quote | 双引号内的 `'` 是字面量；`case '\''` 增加 `quote` 保护 |
+| 7 | `case x in ) …` 空模式未正确报错 | 空模式判定由 `start==i` 改为 `parse_span_is_blank(buf,start,i)` |
+| 8 | 旧版 `parse_set_pipe_start` 从 `size-1` 起回退找 BREAK 并插在其前 | 同上 #3，改为从 `size` 起找最后一个 BREAK 并插在其后 |
 
-### 2.4 内存泄漏（已修复）
+> 说明：`a > b > c` 正确解析为 `REDIR_OUT(b) REDIR_OUT(c) EXE[a]`——目标 `b` 在紧随其后的
+> 空格处即被第一个重定向消费，第二个 `>` 随后作为新重定向处理；只有 `a > > b`（重定向后
+> 无目标词又遇操作符）才报错。
 
-原设计没有任何释放路径，每次解析都会泄漏：
+## 4. 清理不再需要的代码
 
-1. 每个关键字断点（`if`/`then`/`fi`/`do`…）处的 `[NULL]` 参数缓冲泄漏（`da_init(&arg)` 丢弃不释放）；
-2. 每次重定向断点：挂起的命令参数缓冲泄漏（命令本应进入 EXECUTE，见问题 4）；
-3. 空 `CMD_BREAK`（连续换行/空命令）的 `[NULL]` 缓冲泄漏；
-4. 错误路径：已生成的 `type_execute`/`type_redir` 结构及其参数全部泄漏；
-5. fd 剥离后变空的参数缓冲泄漏（`2> f`、`2>&1`）。
+- 被注释掉的 8 行静态全局状态块；
+- `parse_deal_break()`（旧操作符分发，引用未定义全局，逻辑已内联）+ `parse_is_execute_break()`；
+- `parse_emit_command()` / `parse_is_assignment()`（NAME=value 拆词逻辑，与"完整命令"设计冲突）；
+- 结构体 `type_var` / `type_function` / `type_item` 与宏 `parse_create_item` / `parse_create_function`；
+- 枚举中无人使用的 `CMD_CASE_ITEM`、`CMD_FUNCTION_START`、`CMD_FUNCTION_END`、`CMD_VAR`
+  （case 模式与函数名复用 `CMD_EXECUTE` 承载完整命令原文）；
+- 底部残缺的"Execute Part"：`parse_execute()`、`parse_execute_exe()`、`parse_escseq()`、
+  `parse_execute_dollar()`、全局 `retval`、`IS_HEX/TO_HEX/IS_OCT` 宏；
+- 旧版遗留的 `cnull`、未使用变量 `part` 等。
 
-修复：明确所有权——`type_execute.argraw`、`type_redir.to_file`（改为 `strdup` 拷贝）、
-`type_redir.body`（here-doc 主体）均为解析器拥有；新增公开接口
-`void parse_commands_free(commands_t *cmds)`（结构体本身由调用方 `free`，错误路径可用同一函数清理栈上结构）。
-泄漏测试：代表脚本 2000 轮，free 模式 0 泄漏；对照组（不释放）每轮约泄漏 1.8 KB。
+保留的对外接口不变：`parse_check()`（mnsh.h 已声明）、`parse_divide_command()`、
+`parse_commands_free()`、`commands_t`/`type_execute`/`type_redir`。
 
----
+## 5. 报错信息（每个 `parse_error=1` 处均有对应输出）
 
-## 3. parser 下一阶段功能（本次已实现）
+| 触发点 | 报错信息 |
+|---|---|
+| case 模式为空 | `parse: syntax error: empty case pattern` |
+| 重定向无目标（后接操作符 / 空目标 / EOF，共 3 处） | `parse: syntax error: redirector without a target` |
+| `\|` 前无命令 | `parse: syntax error near '\|'` |
+| `&` 前无命令 | `parse: syntax error near '&'` |
+| 悬空管道（EOF 时 `pipe_need_cmd`） | `parse: syntax error: expected a command after '\|'` |
+| 关键字/分组不配平（`parse_validate`） | `parse: syntax error: unbalanced or mismatched keywords` |
+| 未处理的操作符（防御性 default） | `parse: internal error: unhandled operator` |
+| 无等待目标的重定向（防御性） | `parse: internal error: no redirector awaiting a target` |
+| `>&`/`<&` 后不是合法 fd | `parse: invalid fd after '>&' or '<&': '%s'` |
+| here-doc 到 EOF 未遇分隔符 | `parse: here-document delimited by end-of-file (wanted '%s')` |
+| 未闭合单引号 | `parse: unterminated single quote` |
+| 未闭合反引号（旧代码此处无信息，本轮补上） | `parse: unterminated backquote` |
 
-| 功能 | 说明 | 验证 |
-|------|------|------|
-| 命令+重定向正确关联 | 重定向操作码插入到其所属命令（尾部 EXECUTE 段最后一个）之前，fd 词剥离后命令仍完整 | `ls > f 2> g` → `REDIR_OUT(f), REDIR_OUT(fd=2,g), EXE[ls]` |
-| EOF 冲刷 | 无结尾换行时刷新挂起命令、重定向目标、未闭合管道 | `echo hi`（无 `\n`）→ `EXE[echo,hi] BREAK` |
-| fd 语法 | `n>`/`n>>`/`n>&`/`n<&`/`n>&-`，仅当数字与操作符紧邻；溢出保护 | `echo 2 > f` 中 2 是参数；`2>&1` → `DUP(fd=2,dup=1)` |
-| 管道序列 | `CREATE_PIPE`→`CONTINUE_PIPE`→`DELETE_PIPE`；`a \|\n b` 续行；`a \|` 悬空报错 | `a\|b\|c` → `CREATE_PIPE EXE(a) CONTINUE_PIPE EXE(b) EXE(c) DELETE_PIPE BREAK` |
-| 后台任务组 | `BACKGROUND_START/END` 插入位置修正（`parse_add_stype_loc` 全量遍历） | `sleep 1 & echo done &` 两组数据正确 |
-| 子 shell/分组/数学 | 符号表 22 项全部生效；`{` `(` `((` 仅在命令位或紧邻函数名/`=` 时作为操作符；`}` `)` 仅在存在未闭合 opener 时作为操作符 | `( echo sub )`、`{ a; b; }`、`((1+2))`、`echo {a,b}` |
-| `$` 扩展跳过 | `${...}`/`$(...)`/`$((...))`/`$'...'` 支持嵌套与引号/转义，并消费闭括号，保持整体为一个词 | `${a:-${b}}`、`$(echo (x))`、`$((1+2))` |
-| here-doc | `<<EOF` 收集主体至分隔行（`body` 字段），分隔符支持引号（`<<'EOF'`）；EOF 截断报错 | `cat <<EOF\nhello\nthere\nEOF\n` → `body=[hello\nthere\n]` |
-| here-string | `<<<` 目标正确归入重定向 | `cat <<<"hello world"` |
-| case 结构 | `case 词 in` 识别 `IN`；`)` 结束模式（模式词发出为 EXECUTE+BREAK）；`;;` 保持双 BREAK | `case x in a) echo a;; esac` 流完整 |
-| for/while/until | `for i in ...` 的 `IN` 关键字识别；`do`/`done` 发出 | `for i in 1 2 3; do echo $i; done` |
-| 函数定义 | `name(`（紧邻、合法名）→ `FUNCTION` + `EXE[name]` + `PART_START..PART_END` 体 | `foo() { echo hi; }` |
-| 关键字结构校验 | 栈式校验 `if..then..fi`、`for/while/until..do..done`、`case..esac`、`{}`/`()`/`(())` 配平；不匹配返回 NULL | `if ls` → parse error |
-| 引号/注释 | 单引号、反引号死循环修复；未闭合引号报错；`#` 仅词首为注释 | `echo 'a b'`、`echo $#`、`# comment` |
+## 6. 注释修复
 
-### 下一阶段仍未实现（建议按此顺序）
+- 文件头新增总体说明：解析器只识别结构，`type_execute.argraw` 保存完整命令原文、指向调用者
+  缓冲、缓冲在 `commands_t` 存活期内不得释放；
+- 更新 `parse_commands_free`、`type_execute.argraw`、`parse_emit_command_raw`、
+  `parse_set_pipe_start`、`parse_is_fd_span`、`parse_span_is_blank` 等注释与实现一致；
+- 枚举 `CMD_CASE_BREAK` 标注"仅作内部断点类型，不输出"。
 
-1. **执行器**：解释 `commands_t` 操作码流（EXECUTE/REDIR/PIPE/AND/OR/BG/IF/FOR/CASE/FUNCTION…），
-   当前 `main.c` 的 `parse_buffer` 是旧式 `command_t` 执行器，与新的操作码流不兼容，需整体替换或桥接；
-2. **变量展开/别名/通配符**：`type_execute.argraw` 的词是原始文本（含引号、`$var`），需在执
-   行前展开（可复用 `main.c` 的 `parse_variable` 等）；
-3. **交互续行**：`main.c` 的 `parse_is_continue` 需感知关键字/管道/重定向（`if ls` 后应继续读入
-   直到 `fi`），否则新解析器的结构校验会在交互模式误报；
-4. **case 模式的 `(` 内嵌、`foo ()`（带空格）函数名、`x=(a b c)` 数组赋值的词内重组**；
-5. **错误恢复**：解析错误后从下一个 `;`/换行继续，而不是整行丢弃；
-6. **here-doc 内展开**（`<<EOF` 未加引号时主体可展开变量）、CRLF 处理、`\r` 剥离。
+## 7. 验证
 
----
-
-## 4. 其他文件的既有问题（未修复，建议处理）
-
-### 4.1 mnsh.c
-
-| # | 位置 | 问题 |
-|---|------|------|
-| 1 | `cmd_str_to_num()` | 与 `parse_is_fd` 同款 bug：`r.num=str[i]-'0'` 覆盖累加，`"123"` 解析为 3；影响 `$12` 位置参数、`%12` 作业号、`>&12` 等 |
-| 2 | `set_env()`/`unset_env()` | 用“尾元素交换”删除，`variable.arr[i].env` 保存的下标会失效：`export A; export B; unset A; export C` 后环境表错乱 |
-| 3 | `set_tmp_env()`/`recovery_tmp_env()` | `tmp_env.arr[i].var` 指向命令行的 `argv` 字符串，而 `parse_buffer()` 在执行后即 `free(argv[j])`，恢复时 `unset_var()` 对悬垂指针做 `strcmp`（use-after-free） |
-| 4 | `add_job(now_name,...)` | `now_name` 随后被 `parse_buffer()` `free()`，`job.arr[i].name` 悬垂；`sh_jobs`/`deal_jobmsg` 打印已释放内存 |
-| 5 | `execute_command_parent()` | `exit(WIFEXITED(status)?127:WEXITSTATUS(status))` 条件倒置：正常退出返回 127，被信号杀死的进程却取无意义的 `WEXITSTATUS` |
-| 6 | `file_is_exist()` | `PATH` 内容逐字符写入固定 4096 字节的 `pathbuf`，无边界检查；超长 `PATH` 栈溢出（`pathbuf` 是全局） |
-| 7 | `sh_cd()` 错误路径 | `chdir` 失败时 `strlen(argv[1])`，而 `argv[1]` 可能为 NULL（如 `cd` 且 HOME 未设置）→ 段错误 |
-| 8 | `deal_jobmsg()` | `find_job_pid()` 返回 `(size_t)-1` 时直接 `job.arr[k]` 越界读；`jobmsgsiz` 在信号处理器中非原子递增 |
-| 9 | `sh_bg()` | 循环内 `get_job_num(argv[1])` 应为 `argv[k]` |
-| 10 | `get_job_num()` | `%+` 用 `job.size-1` 当下标而非最新作业号，作业删除后 `%+`/`%-` 解析失败 |
-| 11 | `sh_history()` | 非选项参数报错信息误写为 `"cd: too many arguments"` |
-| 12 | `parse_is_fd` 同款累加 | `restore_cmd_redir()` 中 `int fd=(size_t)r->_1` 的转换（有 `_1>=0` 保护，低危） |
-
-### 4.2 main.c
-
-| # | 位置 | 问题 |
-|---|------|------|
-| 1 | `parse_is_continue()` | `buf->arr[buf->size-1]`：空行时 `size==0` → `arr[(size_t)-1]` 越界读 |
-| 2 | `execute_shebang()` | shebang 行无结尾换行时内层 `while(c!=' '&&c!='\0'&&c!='\n')` 在 EOF 后永不退出（`c` 不再变化）→ 死循环 |
-| 3 | `execute_command_parent()` | 内置命令（除 echo）不 fork 直接执行，但文件重定向在子进程分支才打开 → `cd > file` 等重定向失效 |
-| 4 | `parse_buffer()` | 与 mnsh.c#3/#4 同源的 `now_name` 生命周期问题 |
-
-### 4.3 CDS/
-
-- `input.h`：`static da_history history;`、`static da_str input_buffer;` 定义在头文件内，
-  每个包含它的翻译单元各持一份（`main.c` 的 `history` 与 `mnsh.c` 的 `history` 是不同对象），
-  历史功能实际不工作；`last_history()` 用 `strlen` 处理可能含嵌入 `\0` 的缓冲，长度计算错误。
-- `darray.h`：`da_init` 用 `sizeof(darray_t(void))` 清零（行为正确但写法危险）；`da_resize` 缩小后
-  保留旧数据，调用方需自行维护 `size`。
-
-### 4.4 构建
-
-- `make` 当前失败：22 个错误，全部源于 `mnsh.c` 使用已被 `mnsh.h` 删除的旧类型
-  （`command_t`、`var_arr_t`、`var_int_t`、`var_func_t`、`VAR_ARR_SIZE`）与
-  `input()` 签名不匹配（`sh_read` 调用 `input(echobuf)`）。仓库处于重构中途：
-  新式 `CDS/` + `parser.c`（独立可测）与旧式 `main.c`/`mnsh.c` 执行器并存。
-
----
-
-## 5. 验证
-
-### 5.1 测试驱动
-
-- `ptest.c`：60+ 用例（每例在子进程内运行并带 3 秒超时，捕获死循环），覆盖
-  基础命令/重定向（含 fd、dup、close、here-doc、here-string）/管道/后台/逻辑运算/
-  关键字结构/case/函数/子 shell/数学/引号/注释/负向用例。
-- `leaktest.c`：代表脚本 2000 轮 × free / nofree 两模式。
-- 编译：`cc -std=gnu99 -O0 -g -fsanitize=address,undefined`。
-
-### 5.2 结果
-
-| 项 | 修复前 | 修复后 |
-|----|--------|--------|
-| 死循环用例 | 5 个挂死（`2>`、`'`、`` ` `` 相关） | 0 |
-| ASan/UBSan 报错 | —（挂死前未见，泄漏存在） | 0 |
-| 泄漏（2000 轮 free 模式） | 每轮 ≥3 处 | 0 |
-| `test.sh` 解析 | 命令缺失、重定向错乱 | 结构正确（`if→EXE→BREAK→then→REDIR→EXE→fi`…） |
-
-`test.sh` 片段示例（修复后）：
-```
-0 14            IF
-1 1             EXECUTE [ls]
-2 2             BREAK
-3 15            THEN
-4 8             REDIR_OUT (fd=-1 file=test)
-5 1             EXECUTE [ls]
-6 17            FI
-```
-
-### 5.3 复现方式
+测试驱动同步适配 `char *argraw`（`test.c`、`ptest.c` 各改一处打印逻辑）。
 
 ```sh
-cc -std=gnu99 -O0 -g -fsanitize=address,undefined -o ptest ptest.c && ./ptest
+cc -std=gnu99 -O0 -g -Wall -Wextra -fsanitize=address,undefined -o ptest ptest.c && ./ptest
 cc -std=gnu99 -O0 -g -fsanitize=address      -o leaktest leaktest.c && ./leaktest free
+cc -std=gnu99 -O0 -g -fsanitize=address,undefined -o test test.c && ./test
 ```
 
----
+| 项 | 结果 |
+|---|---|
+| `-Wall -Wextra` 编译 | 0 警告 |
+| ptest 68 个用例 | 全部通过；10 个负向用例按预期打印 `parse error`；无超时、无 ASan/UBSan 报错 |
+| leaktest free 模式（2000 轮） | 0 泄漏（LSan 无报告） |
+| leaktest nofree 对照（2000 轮） | 泄漏 96000 字节，证明解析结果的所有权确在解析器堆对象中 |
+| `test.c` 解析 `test.sh` | 成功，输出约 370 条操作码流（IF/FOR/CASE/FUNCTION/重定向/管道/后台齐全） |
 
-## 6. 文件变更
+代表性输出：
+
+```
+[pipe3] input: a | b | c
+    0 CREATE_PIPE    1 EXECUTE [a]    2 CONTINUE_PIPE
+    3 EXECUTE [b]    4 EXECUTE [c]    5 BREAK   6 DELETE_PIPE  7 BREAK
+[if] input: if ls; then ls > test 2>&1; fi
+    0 IF   1 EXECUTE [ls]   2 BREAK   3 THEN
+    4 REDIR_OUT (fd=-1 file=test)   5 REDIR_DUP (fd=2 dup=1)   6 EXECUTE [ls]   7 FI
+[func] input: foo() { echo hi; }
+    0 FUNCTION   1 EXECUTE [foo]   2 PART_START   3 EXECUTE [echo hi]   4 BREAK   5 PART_END
+```
+
+## 8. 文件变更（未提交）
 
 | 文件 | 变更 |
-|------|------|
-| `parser.c` | 整体重写：修复 2.1–2.4 全部问题，实现第 3 节功能；新增 `parse_commands_free()`；`type_redir` 增加 `body` 字段（here-doc 主体） |
-| `test.c` | 解析后调用 `parse_commands_free(cmd); free(cmd); free(buf);`（原样泄漏） |
-| `ptest.c`（新增） | 解析器功能测试驱动（60+ 用例，子进程超时防挂死） |
-| `leaktest.c`（新增） | 内存所有权泄漏测试（free/nofree 双模式） |
-| `REPORT.md`（本文件） | 审查报告 |
+|---|---|
+| `parser.c` | 整体重写（1489 → 1196 行）：完成 `type_execute` 完整命令设计、修复第 2/3 节全部问题、为每个 `parse_error` 添加报错信息、修复注释、清理第 4 节死代码 |
+| `test.c` | `type_execute.argraw` 打印适配（词数组循环 → 直接 `%s`） |
+| `ptest.c` | 同上（一处） |
+| `leaktest.c` | 无改动 |
+| `REPORT.md`（本文件） | 本轮修复报告（覆盖上一版审查报告） |
 
-> 注：`parser.c` 当前通过 `test.c`/`ptest.c` 直接 `#include "CDS/darray.c"` 方式编译，
-> 尚未加入 `Makefile`；接入主程序与实现操作码流执行器是下一阶段的首要任务。
+> 工作区中 `CDS/confc.h`、`CDS/darray.h`、`CDS/input.h` 的改动与新增的 `CDS/bitmap.*`
+> 在本轮之前已存在，本轮未触碰。
+
+## 9. 遗留事项
+
+1. **执行器**：新操作码流仍未接入 `main.c`/`mnsh.c`（旧执行器使用已被删除的 `command_t`，
+   `make` 仍有预先存在的编译错误，与本轮无关）。执行时需要：对 `type_execute.argraw` 做词切分
+   与 `$` 展开（重定向已由解析器提取为 `type_redir`，fd/目标/here-doc body 已就绪）。
+2. 交互续行（`parse_is_continue`）需感知关键字/管道/重定向，否则交互模式会把 `if ls` 之后
+   的行误判为不完整。
+3. `foo ()`（带空格）函数名、`x=(a b c)` 数组赋值的词内重组、case 模式内嵌 `(` 等边缘特性
+   仍按上一版 REPORT 第 3 节列出的顺序延后（现在 `x=(a b c)` 会作为完整命令原文原样保留）。
+4. here-doc 无引号分隔符时的体内 `$` 展开、CRLF/`\r` 处理。
+
+## 10. 结构调整：goto 压平 `if(break_type!=CMD_RESERVED)` 内的嵌套
+
+- 原结构为 `if(redir){…}else{switch(…)}`：分隔符 switch 及其 case 处于第 4 层嵌套。
+- 改为直通式（goto）：
+  - 重定向分支处理完成后 `goto L_after_operator`，直接跳到操作符后的前进/续扫代码，
+    不再需要 `else`；
+  - fd 词命中时 `goto L_insert_redir`，与未命中路径汇合，`if/else` 拆为两段直通代码；
+  - 分隔符 switch 及其全部 case 因此整体上移一层（第 3 层）。
+- 行为保持不变：重编译后 `-Wall -Wextra` 0 警告；ptest 68 用例输出与重构前**逐字节一致**
+  （10 个负向用例照常报错）；leaktest free 模式仍 0 泄漏。
+
+## 11. 用户修改部分：测试发现并修复的回归
+
+用户在第 10 节结构之上又做了一处改动（把 `if(quote){ goto L; }` 改为合并式条件、并删除
+`if(buf[i]==' '||buf[i]=='\t'||buf[i]=='\n'||break_type!=CMD_RESERVED)` 边界包裹），
+该改动破坏了解析器，全部 68 个 ptest 用例（含空输入）报 `parse: internal error: unhandled operator`：
+
+- 新条件 `quote||(buf[i]==' '&&buf[i]=='\t'&&buf[i]=='\n'&&break_type==CMD_RESERVED)`
+  中 `' '&&'\t'` 恒为假，空白字符不再进入边界处理；
+- 失去边界包裹后，分隔符 `switch` 对每个普通字符（`break_type==CMD_RESERVED`）都会命中
+  `default` 分支 → 报错；
+- 纯空白分支（word boundary 处理）变成不可达代码。
+
+修复方式（保留用户"扁平 + 合并条件"的方向）：
+
+- 条件改为正确的"普通字符"判定：`quote||(buf[i]!=' '&&buf[i]!='\t'&&buf[i]!='\n'&&break_type==CMD_RESERVED)`
+  → 走 `L`（普通字符/引号）；其余（空白或操作符）进入边界分发；
+- 在 is_redir 处理之后增加 `if(break_type==CMD_RESERVED) goto L_word_boundary;`，
+  让纯空白分支经 `L_word_boundary:` 标签可达；
+- 修正 switch case 的错乱缩进。
+
+验证：ptest 68 用例输出与用户改动前**逐字节一致**（10 个负向用例照常报错，ASan/UBSan 0 报告）；
+leaktest free 模式 0 泄漏；`test.c` 解析 `test.sh` 成功。
+
+> `make` 仍失败，但那是 `mnsh.c` 使用已从 `mnsh.h` 删除的旧类型（`command_t`、`var_arr_t` 等）
+> 的**预先存在**问题（见第 9 节遗留事项 1），与 parser 无关；`nmsh` 可正常构建。
