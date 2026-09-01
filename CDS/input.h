@@ -19,6 +19,7 @@ void input_add_history(const char *history);
 #include <stdlib.h>
 #include <unistd.h>
 #include <memory.h>
+#include <errno.h>
 #include <termios.h>
 #define __USE_XOPEN
 #include <wchar.h>
@@ -41,7 +42,10 @@ inline static int da_clear(void *array);
 
 #endif
 
+#ifndef DA_STR_T
+#define DA_STR_T
 typedef darray_t(char) da_str;
+#endif
 typedef darray_t(char*) da_history;
 
 
@@ -109,7 +113,7 @@ static void echo_to_buf(const char *str,size_t size);
 static void echo_buf_to_fd(int fd);
 
 static size_t get_char_width(const char *c);
-static size_t get_char_len(const char *c);
+static int get_char_len(const char *c);
 
 #define output(s,l) if(in_echo)write(out_fd,s,l)
 static void insert(const char *c,unsigned len);
@@ -181,14 +185,23 @@ int input_basic(char **buf,const char *echobuf){
     da_init(&input_buffer);
     input_buffer.arr=*buf;
 
-    size_t len=0;
-    while(echobuf[len++]);
-    echo_to_buf(echobuf,len);
-    echo_buf_to_fd(out_fd);
+    if(echobuf){
+        size_t len=strlen(echobuf)+1;
+        echo_to_buf(echobuf,len);
+        echo_buf_to_fd(out_fd);
+    }
 
-    int c=0;
+    char c=0;
     while(1){
         int ret=read(in_fd,&c,1);
+        if(ret==-1){
+            if(errno==EINTR){
+                continue;
+            }
+            da_add(sizeof(char),&input_buffer,"");
+            *buf=input_buffer.arr;
+            return -1;
+        }
         if(c=='\n'){
             da_add(sizeof(char),&input_buffer,"");
             *buf=input_buffer.arr;
@@ -200,9 +213,6 @@ int input_basic(char **buf,const char *echobuf){
         }
         da_add(sizeof(char),&input_buffer,&c);
     }
-    da_add(sizeof(char),&input_buffer,"");
-    *buf=input_buffer.arr;
-    return -1;
 }
 int input(char **buf,const char *echobuf){
     if(!isatty(in_fd)){
@@ -220,7 +230,8 @@ int input(char **buf,const char *echobuf){
         echowidth=0;
         while(echobuf[i]){
             echowidth+=get_char_width(&echobuf[i]);
-            i+=get_char_len(&echobuf[i]);
+            int cl=get_char_len(&echobuf[i]);
+            i+=cl>0?(size_t)cl:1;
         }
     }else{
         echowidth=0;
@@ -235,7 +246,10 @@ int input(char **buf,const char *echobuf){
     while(1){
         ret=read(in_fd,&c,1);
         if(ret==-1){
-            continue;
+            if(errno==EINTR){
+                continue;
+            }
+            break;
         }
         if(c==0x04||ret==0){
             set_terminal_echo(1);
@@ -258,20 +272,44 @@ int input(char **buf,const char *echobuf){
             *buf=input_buffer.arr;
             return 0;
         }else if(deal_keys(&input_buffer,&input_pos,c)==-1){
-            char buf[8]={c};
+            /* 尝试拼出完整多字节字符; 非法/未完成的序列丢弃, 防止越界与死循环 */
+            char mb[8]={c};
             size_t i=1;
-            while((ret=get_char_len(buf))<0){
-                read(in_fd,&c,1);
-                buf[i++]=c;
+            int cl;
+            while((cl=get_char_len(mb))<=0){
+                int rr=read(in_fd,&c,1);
+                if(rr<=0){
+                    break; /* EOF/读错误 */
+                }
+                if(c=='\n'){
+                    /* 回车结束本行 */
+                    echo_to_buf("\n",1);
+                    echo_buf_to_fd(out_fd);
+                    if(!now_is_bufffer){
+                        free(history.arr[history.size-1]);
+                        da_pop(sizeof(char*),&history);
+                    }
+                    now_is_bufffer=1;
+                    set_terminal_echo(1);
+                    da_add(sizeof(char),&input_buffer,"");
+                    *buf=input_buffer.arr;
+                    return 0;
+                }
+                if(i+1>=sizeof(mb)){
+                    break; /* 缓冲已满仍无法解析 */
+                }
+                mb[i++]=c;
             }
-            insert(buf,ret);
+            if(cl>0){
+                insert(mb,(unsigned)cl);
+            }
         }
     }
 
     set_terminal_echo(1);
     da_add(sizeof(char),&input_buffer,"");
     *buf=input_buffer.arr;
-    return 0;
+    return -1;
 }
 
 
@@ -296,7 +334,7 @@ int deal_keys(da_str *input_buffer,size_t *input_pos,unsigned char c){
     for(size_t i=0;i<16;i++){
         if(i!=0){
             ret=read(in_fd,&buf[i],1);
-            if(ret==0){
+            if(ret<=0){ /* EOF/读错误: 插入已收集部分 */
                 insert(echo,echo_i);
                 return 1;
             }
@@ -331,9 +369,12 @@ int deal_keys(da_str *input_buffer,size_t *input_pos,unsigned char c){
 
 size_t next_char(const char *str,size_t input_pos,size_t size){
     wchar_t wc;
-    int r=mbtowc(&wc,str+input_pos,MB_CUR_MAX);
-    if(r<=0){
+    if(input_pos>=size){
         return input_pos;
+    }
+    int r=mbtowc(&wc,str+input_pos,size-input_pos);
+    if(r<=0){
+        return input_pos+1; /* 非法字节: 前进 1 字节, 保证进展 */
     }
     return input_pos+r;
 }
@@ -356,10 +397,11 @@ size_t get_char_width(const char *c){
     if(r<0){
         return 0;
     }
-    return wcwidth(wc);
+    int w=wcwidth(wc);
+    return w<0?0:(size_t)w; /* 控制字符等返回 0, 避免 size_t 下溢 */
 }
 
-size_t get_char_len(const char *c){
+int get_char_len(const char *c){
     wchar_t wc;
     int r=mbtowc(&wc,c,MB_CUR_MAX);
     return r;
@@ -367,18 +409,21 @@ size_t get_char_len(const char *c){
 
 
 void insert(const char *c,unsigned len){
-    if(input_buffer.size+len>=input_buffer.real){
-        da_resize(sizeof(char),&input_buffer,input_buffer.size+len+1);
+    /* 保留冗余(1 个 NUL + 6 字节前瞻), 供 mbtowc 安全读取 */
+    if(input_buffer.size+len+6>=input_buffer.real){
+        da_resize(sizeof(char),&input_buffer,input_buffer.size+len+1+6);
     }
     memmove(input_buffer.arr+input_pos+len,input_buffer.arr+input_pos,input_buffer.size-input_pos);
     memcpy(input_buffer.arr+input_pos,c,len);
     input_buffer.size+=len;
+    input_buffer.arr[input_buffer.size]='\0';
     size_t i=0;
     output(input_buffer.arr+input_pos,input_buffer.size-input_pos);
     size_t dpos=input_pos;
     while(i<len){
         dpos=next_char(input_buffer.arr,dpos,input_buffer.size);
-        i+=get_char_len(&c[i]);
+        int cl=get_char_len(&c[i]);
+        i+=cl>0?(size_t)cl:1;
     }
     input_pos=input_buffer.size;
     to_pos(dpos);
@@ -468,9 +513,8 @@ void backspace(){
     to_pos(dpos);
     clean_show(input_pos);
     memmove(input_buffer.arr+dpos,input_buffer.arr+opos,input_buffer.size-opos);
-    for(int i=0;i<opos-dpos;i++){
-        da_pop(sizeof(char),&input_buffer);
-    }
+    input_buffer.size-=opos-dpos;
+    input_buffer.arr[input_buffer.size]='\0';
     output(input_buffer.arr+input_pos,input_buffer.size-input_pos);
     input_pos=input_buffer.size;
     to_pos(dpos);
@@ -485,17 +529,15 @@ void delete(){
     size_t dpos=next_char(input_buffer.arr,input_pos,input_buffer.size);
     if(input_pos==input_buffer.size-1){
         clean_show(input_pos);
-        for(int i=0;i<dpos-input_pos;i++){
-            da_pop(sizeof(char),&input_buffer);
-        }
+        input_buffer.size-=dpos-input_pos;
+        input_buffer.arr[input_buffer.size]='\0';
         return ;
     }
 
     clean_show(input_pos);
     memmove(input_buffer.arr+input_pos,input_buffer.arr+dpos,input_buffer.size-dpos);
-    for(int i=0;i<dpos-input_pos;i++){
-        da_pop(sizeof(char),&input_buffer);
-    }
+    input_buffer.size-=dpos-input_pos;
+    input_buffer.arr[input_buffer.size]='\0';
 
     output(input_buffer.arr+input_pos,input_buffer.size-input_pos);
 
@@ -612,9 +654,8 @@ void clear_last_word(){
     to_pos(dpos);
     clean_show(input_pos);
     memmove(input_buffer.arr+dpos,input_buffer.arr+opos,input_buffer.size-opos);
-    for(size_t i=0;i<opos-dpos;i++){
-        da_pop(sizeof(char),&input_buffer);
-    }
+    input_buffer.size-=opos-dpos;
+    input_buffer.arr[input_buffer.size]='\0';
     output(input_buffer.arr,input_buffer.size-input_pos);
     input_pos=input_buffer.size;
     to_pos(dpos);
@@ -630,7 +671,9 @@ void last_history(){
 
     if(now_is_bufffer){
         char *p=malloc(sizeof(char)*(input_buffer.size+1));
-        memcpy(p,input_buffer.arr,input_buffer.size);
+        if(input_buffer.size){
+            memcpy(p,input_buffer.arr,input_buffer.size);
+        }
         p[input_buffer.size]='\0';
         da_add(sizeof(char*),&history,&p);
         now_is_bufffer=0;
@@ -638,9 +681,10 @@ void last_history(){
     history_pos--;
     da_clear(&input_buffer);
     input_buffer.size=strlen(history.arr[history_pos]);
-    input_buffer.arr=malloc(input_buffer.size);
+    input_buffer.arr=malloc(input_buffer.size+7);
     memcpy(input_buffer.arr,history.arr[history_pos],input_buffer.size);
-    input_buffer.real=input_buffer.size;
+    input_buffer.arr[input_buffer.size]='\0';
+    input_buffer.real=input_buffer.size+7;
     input_pos=input_buffer.size;
 
     output(input_buffer.arr,input_buffer.size);
@@ -657,9 +701,10 @@ void next_history(){
     history_pos++;
     da_clear(&input_buffer);
     input_buffer.size=strlen(history.arr[history_pos]);
-    input_buffer.arr=malloc(input_buffer.size);
+    input_buffer.arr=malloc(input_buffer.size+7);
     memcpy(input_buffer.arr,history.arr[history_pos],input_buffer.size);
-    input_buffer.real=input_buffer.size;
+    input_buffer.arr[input_buffer.size]='\0';
+    input_buffer.real=input_buffer.size+7;
     input_pos=input_buffer.size;
     if(history_pos==history.size-1){
         free(history.arr[history.size-1]);

@@ -46,6 +46,7 @@ const char *ini_lookup_from_section(ini_section_t *section,const char *key);
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
@@ -66,7 +67,10 @@ inline static int da_clear(void *array);
 
 #endif
 
+#ifndef DA_STR_T
+#define DA_STR_T
 typedef darray_t(char) da_str;
+#endif
 
 // confc.c
 
@@ -79,13 +83,29 @@ ini_t ini_load(const char *filename){
 
     struct stat status;
     if(fstat(fd,&status)!=0){
+        close(fd);
         return ret;
     }
     char *mem=malloc(status.st_size+1);
-    read(fd,mem,status.st_size);
+    if(!mem){
+        close(fd);
+        return ret;
+    }
+    ssize_t got=0;
+    while(got<(ssize_t)status.st_size){
+        ssize_t n=read(fd,mem+got,status.st_size-got);
+        if(n<=0){
+            if(n==-1&&errno==EINTR){
+                continue;
+            }
+            break; /* 读错误/EOF: 剩余部分清零 */
+        }
+        got+=n;
+    }
     close(fd);
 
-    mem[status.st_size]='\0';
+    mem[got]='\0';
+    memset(mem+got+1,0,status.st_size-got);
     ret=ini_load_from_memory(mem);
 
     free(mem);
@@ -93,9 +113,7 @@ ini_t ini_load(const char *filename){
 }
 
 inline static void ini_init_section(ini_t *file,ini_section_t **now_section){
-    char *key=malloc(1);
-    key[0]='\0';
-    ini_section_t section={.name=key};
+    ini_section_t section={.name=""};
     *now_section=ini_add_section(file,&section);
 }
 static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char *file,size_t *i){
@@ -108,7 +126,7 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
     while(file[i]==' '){
         i++;
     }
-    if(file[i]=='\n'||file[i]=='\0'){
+    if(file[i]=='\n'||file[i]=='\r'||file[i]=='\0'){
         return ;
     }
 
@@ -117,11 +135,11 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
         while(file[i]==' '){
             i++;
         }
-        while(file[i]!=']'&&file[i]!='\0'){
+        while(file[i]!=']'&&file[i]!='\r'&&file[i]!='\0'){
             da_add(sizeof(char),&key,&file[i]);
             i++;
         }
-        if(file[i]=='\0'){
+        if(file[i]=='\r'||file[i]=='\0'){
             da_clear(&key);
             return ;
         }
@@ -132,6 +150,7 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
         da_add(sizeof(char),&key,"");
         ini_section_t section={.name=key.arr};
         *now_section=ini_add_section(ret,&section);
+        da_clear(&key);
         while(file[i]!='\n'&&file[i]!='\0'){
             i++;
         }
@@ -143,7 +162,7 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
         return ;
     }
 
-    while(file[i]!='='&&file[i]!='#'&&file[i]!='\n'&&file[i]!='\0'){
+    while(file[i]!='='&&file[i]!='#'&&file[i]!='\r'&&file[i]!='\n'&&file[i]!='\0'){
         da_add(sizeof(char),&key,&file[i]);
         i++;
     }
@@ -164,7 +183,7 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
     while(file[i]==' '){
         i++;
     }
-    while(file[i]!='#'&&file[i]!='\n'&&file[i]!='\0'){
+    while(file[i]!='#'&&file[i]!='\r'&&file[i]!='\n'&&file[i]!='\0'){
         da_add(sizeof(char),&value,&file[i]);
         i++;
     }
@@ -179,6 +198,8 @@ static void ini_parse_per_line(ini_t *ret,ini_section_t **now_section,const char
         ini_init_section(ret,now_section);
     }
     ini_add_pair(*now_section,&pair);
+    da_clear(&key);
+    da_clear(&value);
 
     if(file[i]=='#'){
         while(file[i]!='\n'&&file[i]!='\0'){
@@ -210,16 +231,27 @@ void ini_unload(ini_t *file){
             free(file->sections[i].pairs[j].key);
             free(file->sections[i].pairs[j].value);
         }
+        free(file->sections[i].pairs);
     }
     free(file->sections);
-    file->sections=0;
     file->sections=NULL;
+    file->section_size=0;
 }
 
 ini_section_t *ini_add_section(ini_t *file,ini_section_t *section){
+    /* 值语义: 复制 name, 不接管调用者的内存 */
+    const char *src_name=section->name?section->name:"";
+    char *name=malloc(strlen(src_name)+1);
+    if(!name){
+        return NULL;
+    }
+    strcpy(name,src_name);
+    ini_section_t sec=*section;
+    sec.name=name;
+
     if(file->section_size==0){
         file->sections=malloc(sizeof(ini_section_t));
-        memcpy(&file->sections[0],section,sizeof(ini_section_t));
+        memcpy(&file->sections[0],&sec,sizeof(ini_section_t));
         file->section_size++;
         return &file->sections[0];
     }
@@ -228,12 +260,12 @@ ini_section_t *ini_add_section(ini_t *file,ini_section_t *section){
     size_t mid=l+(r-l)/2;
     while(l<=r&&r!=(size_t)-1){
         mid=l+(r-l)/2;
-        int res=strcmp(file->sections[mid].name,section->name);
+        int res=strcmp(file->sections[mid].name,sec.name);
         if(res==0){
-            for(size_t i=0;i<section->pair_size;i++){
-                ini_add_pair(&file->sections[mid],&section->pairs[i]);
+            for(size_t i=0;i<sec.pair_size;i++){
+                ini_add_pair(&file->sections[mid],&sec.pairs[i]);
             }
-            free(section->name);
+            free(name);
             return &file->sections[mid];
         }else if(res<0){
             l=mid+1;
@@ -243,16 +275,32 @@ ini_section_t *ini_add_section(ini_t *file,ini_section_t *section){
     }
     file->sections=realloc(file->sections,(file->section_size+1)*sizeof(ini_section_t));
     memmove(&file->sections[l+1],&file->sections[l],(file->section_size-l)*sizeof(ini_section_t));
-    memcpy(&file->sections[l],section,sizeof(ini_section_t));
+    memcpy(&file->sections[l],&sec,sizeof(ini_section_t));
     file->section_size++;
 
     return &file->sections[l];
 }
 
 void ini_add_pair(ini_section_t *section,ini_pair_t *pair){
+    /* 值语义: 复制 key/value, 不接管调用者的内存 */
+    const char *src_key=pair->key?pair->key:"";
+    const char *src_value=pair->value?pair->value:"";
+    ini_pair_t p=*pair;
+    p.key=malloc(strlen(src_key)+1);
+    if(!p.key){
+        return ;
+    }
+    strcpy(p.key,src_key);
+    p.value=malloc(strlen(src_value)+1);
+    if(!p.value){
+        free(p.key);
+        return ;
+    }
+    strcpy(p.value,src_value);
+
     if(section->pair_size==0){
         section->pairs=malloc(sizeof(ini_pair_t));
-        memcpy(&section->pairs[0],pair,sizeof(ini_pair_t));
+        memcpy(&section->pairs[0],&p,sizeof(ini_pair_t));
         section->pair_size++;
         return ;
     }
@@ -261,11 +309,11 @@ void ini_add_pair(ini_section_t *section,ini_pair_t *pair){
     size_t mid=l+(r-l)/2;
     while(l<=r&&r!=(size_t)-1){
         mid=l+(r-l)/2;
-        int res=strcmp(section->pairs[mid].key,pair->key);
+        int res=strcmp(section->pairs[mid].key,p.key);
         if(res==0){
             free(section->pairs[mid].key);
             free(section->pairs[mid].value);
-            memcpy(&section->pairs[mid],pair,sizeof(ini_pair_t));
+            memcpy(&section->pairs[mid],&p,sizeof(ini_pair_t));
             return ;
         }else if(res<0){
             l=mid+1;
@@ -275,7 +323,7 @@ void ini_add_pair(ini_section_t *section,ini_pair_t *pair){
     }
     section->pairs=realloc(section->pairs,(section->pair_size+1)*sizeof(ini_pair_t));
     memmove(&section->pairs[l+1],&section->pairs[l],(section->pair_size-l)*sizeof(ini_pair_t));
-    memcpy(&section->pairs[l],pair,sizeof(ini_pair_t));
+    memcpy(&section->pairs[l],&p,sizeof(ini_pair_t));
     section->pair_size++;
 }
 
@@ -306,6 +354,7 @@ int ini_del_section(ini_t *file,const char *section){
         free(now->pairs[i].key);
         free(now->pairs[i].value);
     }
+    free(now->pairs);
     free(now->name);
 
     memmove(&file->sections[mid],&file->sections[mid+1],(file->section_size-mid-1)*sizeof(ini_section_t));

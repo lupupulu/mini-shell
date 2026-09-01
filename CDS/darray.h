@@ -53,6 +53,9 @@ int da_add(size_t tp_size,void *array,const void *buf){
 
 int da_add_loc(size_t tp_size,void *array,const void *buf,size_t i){
     darray_t(void) *arr=array;
+    if(i>arr->size){
+        return 127; /* 越界 */
+    }
     if(i==arr->size){
         return da_add(tp_size,array,buf);
     }
@@ -64,8 +67,8 @@ int da_add_loc(size_t tp_size,void *array,const void *buf,size_t i){
 
 int da_del(size_t tp_size,void *array,size_t i){
     darray_t(void) *arr=array;
-    if(!arr->size){
-        return 0;
+    if(!arr->size||i>=arr->size){
+        return 0; /* 空或越界: 无操作 */
     }else if(arr->size-1==i){
         return da_pop(tp_size,array);
     }
